@@ -8,8 +8,8 @@ Every feature ships in two steps, in this order:
 
 1. **Build it.** Implement, add E2E coverage in `tests/e2e.rs`, `scripts/verify.ps1` green.
 2. **Optimize it.** Before the feature is called done:
-   - Measure launch (the `launch_time` E2E test prints CPU and wall time), large-file open,
-     and exe size against the previous release.
+   - Run `./scripts/bench.ps1` (latest release vs your build): launch and 5 MB open,
+     CPU and wall time, plus exe size. CPU time is the signal; wall time is noisy here.
    - Profile anything the feature put on a hot path: startup, file load, keystroke handling.
    - Remove or defer work that doesn't need to happen at startup (lazy-create controls,
      load on first use).
@@ -38,6 +38,7 @@ platform shell stays thin:
 ./scripts/verify.ps1          # fmt, clippy, build, size + DLL gates, unit + E2E tests
 ./scripts/build-msi.ps1       # MSI (WiX 5, pinned; do not upgrade to v6+)
 ./scripts/test-msi.ps1 -Msi <path>
+./scripts/bench.ps1           # optimize step: latest release vs target/release build
 ./scripts/screenshot.ps1      # regenerate docs/screenshot.png
 ```
 
