@@ -18,12 +18,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: ./scripts/test-msi.ps1 -Msi (Get-Item target/release/foxing-*-x64.msi).FullName
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: foxing-${{ github.sha }}
           path: |
