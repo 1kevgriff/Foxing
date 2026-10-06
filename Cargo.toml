@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 description = "Minimal Win32 plain-text editor"
 
-[dependencies.windows-sys]
+[target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
     "Win32_Foundation",
@@ -19,7 +19,7 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
-[dev-dependencies.windows-sys]
+[target.'cfg(windows)'.dev-dependencies.windows-sys]
 version = "0.61"
 features = ["Win32_System_Threading"]
 
