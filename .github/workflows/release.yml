@@ -36,13 +36,22 @@ jobs:
         shell: pwsh
         run: ./scripts/verify.ps1
 
+      - name: Build MSI
+        shell: pwsh
+        run: ./scripts/build-msi.ps1
+
+      # Silent per-user install, verify, uninstall.
+      - name: Test MSI
+        shell: pwsh
+        run: ./scripts/test-msi.ps1 -Msi (Get-Item target/release/foxing-*-x64.msi).FullName
+
       - name: Package
         shell: pwsh
         env:
           TAG: ${{ github.ref_name }}
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/release/foxing.exe dist/
+          Copy-Item target/release/foxing.exe, target/release/foxing-*-x64.msi dist/
           Compress-Archive dist/foxing.exe "dist/foxing-$env:TAG-windows-x64.zip"
           Get-ChildItem dist -File | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name

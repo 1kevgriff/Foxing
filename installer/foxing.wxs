@@ -1,0 +1,33 @@
+<!-- Per-user install: no UAC prompt. Installs to %LOCALAPPDATA%\Programs\Foxing. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Foxing" Manufacturer="Kevin Griffin" Version="$(Version)"
+           UpgradeCode="32132917-9bad-4b72-97bc-f589601c22c6" Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Foxing is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/1kevgriff/Foxing" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Foxing" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Component Id="App" Directory="INSTALLFOLDER" Guid="621107b6-0ecf-48a1-9d9a-ef8bf816eead">
+      <File Id="FoxingExe" Source="$(ExePath)" />
+      <!-- Per-user components need an HKCU key path (ICE38). -->
+      <RegistryValue Root="HKCU" Key="Software\Foxing" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Foxing"
+                Description="Plain-text notes" Target="[#FoxingExe]" WorkingDirectory="INSTALLFOLDER" />
+      <!-- "Open with" for .txt; does not take over the default handler. -->
+      <RegistryValue Root="HKCU" Key="Software\Classes\Applications\foxing.exe\shell\open\command"
+                     Type="string" Value="&quot;[#FoxingExe]&quot; &quot;%1&quot;" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\Applications\foxing.exe\SupportedTypes"
+                     Name=".txt" Type="string" Value="" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\.txt\OpenWithList\foxing.exe" Type="string" Value="" />
+      <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+    </Component>
+  </Package>
+</Wix>

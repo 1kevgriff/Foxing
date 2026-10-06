@@ -38,9 +38,20 @@ jobs:
         shell: pwsh
         run: ./scripts/verify.ps1
 
+      - name: Build MSI
+        shell: pwsh
+        run: ./scripts/build-msi.ps1
+
+      # Silent per-user install, verify, uninstall.
+      - name: Test MSI
+        shell: pwsh
+        run: ./scripts/test-msi.ps1 -Msi (Get-Item target/release/foxing-*-x64.msi).FullName
+
       - uses: actions/upload-artifact@v4
         with:
           name: foxing-${{ github.sha }}
-          path: target/release/foxing.exe
+          path: |
+            target/release/foxing.exe
+            target/release/foxing-*-x64.msi
           if-no-files-found: error
           retention-days: 14
