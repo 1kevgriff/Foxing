@@ -19,6 +19,19 @@ Exe size may grow when a feature earns it. Raise the size gate in `scripts/verif
 deliberately, in the same PR, with the reason. Never raise it to make an unexplained
 regression pass.
 
+## Portability
+
+Mac and Linux versions are planned. Windows-only today, but structure code so the
+platform shell stays thin:
+
+- Logic goes in platform-neutral modules (like `src/text.rs`): decoding, search, folder
+  listing, status-bar values, settings. No Win32 types there; unit-test it there.
+- Win32 code (`src/main.rs`) only creates windows, routes messages, and calls into that logic.
+- Store text as `\n` internally where practical; CRLF is an EDIT-control detail, convert at
+  the Win32 boundary.
+- Use `std::path` / `std::fs` for file work, not Win32 file APIs.
+- Settings and paths: no hardcoded `%APPDATA%` outside the Win32 layer.
+
 ## Commands
 
 ```powershell
