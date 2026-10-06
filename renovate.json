@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Stay on WiX 5: v6+ carries the Open Source Maintenance Fee EULA.",
+      "matchPackageNames": ["wix"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
   ]
 }
