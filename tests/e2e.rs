@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
+use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Threading::{GetProcessTimes, WaitForInputIdle};
 use windows_sys::Win32::UI::Controls::*;
