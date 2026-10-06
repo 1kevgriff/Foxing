@@ -4,6 +4,10 @@ version = "0.1.2"
 edition = "2021"
 description = "Minimal Win32 plain-text editor"
 
+[dependencies]
+# SIMD byte search for the large-file buffer (newline index, find).
+memchr = "2"
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
