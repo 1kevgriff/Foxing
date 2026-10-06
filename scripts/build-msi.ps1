@@ -6,6 +6,9 @@ $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).pack
 $exe = (Resolve-Path 'target/release/foxing.exe').Path
 $msi = "target/release/foxing-$version-x64.msi"
 
+# Cached target/ dirs can hold MSIs from older versions; downstream steps glob for one.
+Remove-Item target/release/foxing-*-x64.msi -ErrorAction SilentlyContinue
+
 dotnet tool restore | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'dotnet tool restore failed' }
 dotnet wix build installer/foxing.wxs -arch x64 -d "Version=$version" -d "ExePath=$exe" -o $msi
