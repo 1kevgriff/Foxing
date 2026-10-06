@@ -181,7 +181,10 @@ unsafe fn load_file(path: PathBuf) {
             if GetWindowTextLengthW(edit) as usize != units {
                 SetWindowTextW(edit, w!(""));
                 set_doc(Document::new());
-                error_box(&format!("{} could not be loaded completely.", path.display()));
+                error_box(&format!(
+                    "{} could not be loaded completely.",
+                    path.display()
+                ));
                 return;
             }
             SendMessageW(edit, EM_EMPTYUNDOBUFFER, 0, 0);
