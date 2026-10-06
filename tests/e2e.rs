@@ -1,5 +1,6 @@
 //! Black-box tests: launch the real exe and drive it with window messages.
 //! Run single-threaded: `cargo test --release -- --test-threads=1`.
+#![cfg(windows)]
 
 #[allow(dead_code)]
 #[path = "../src/ids.rs"]

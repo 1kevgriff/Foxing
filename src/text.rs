@@ -40,23 +40,27 @@ fn utf16(b: &[u8], from_bytes: fn([u8; 2]) -> u16) -> String {
     String::from_utf16_lossy(&units)
 }
 
-/// Converts `\n`, `\r`, and `\r\n` to `\r\n`, which the EDIT control requires.
-pub fn normalize_crlf(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + s.len() / 32);
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        match c {
-            '\r' => {
-                if it.peek() == Some(&'\n') {
-                    it.next();
-                }
-                out.push_str("\r\n");
-            }
-            '\n' => out.push_str("\r\n"),
-            _ => out.push(c),
-        }
+/// Converts `\r\n` and lone `\r` to `\n`, the internal line ending.
+pub fn to_lf(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('\r') {
+        out.push_str(&rest[..i]);
+        out.push('\n');
+        rest = &rest[i + 1..];
+        rest = rest.strip_prefix('\n').unwrap_or(rest);
     }
+    out.push_str(rest);
     out
+}
+
+/// Converts `\n`-only text to the given line ending.
+pub fn with_eol(s: &str, eol: &str) -> String {
+    if eol == "\n" {
+        s.to_owned()
+    } else {
+        s.replace('\n', eol)
+    }
 }
 
 fn fold(c: u16) -> u16 {
@@ -150,16 +154,25 @@ mod tests {
     }
 
     #[test]
-    fn crlf_normalization() {
-        assert_eq!(normalize_crlf("a\nb\rc\r\nd"), "a\r\nb\r\nc\r\nd");
-        assert_eq!(normalize_crlf("\r\r\n\n"), "\r\n\r\n\r\n");
-        assert_eq!(normalize_crlf(""), "");
+    fn lf_normalization() {
+        assert_eq!(to_lf("a\nb\rc\r\nd"), "a\nb\nc\nd");
+        assert_eq!(to_lf("\r\r\n\n"), "\n\n\n");
+        assert_eq!(to_lf("trailing\r"), "trailing\n");
+        assert_eq!(to_lf("é\r\n✓"), "é\n✓");
+        assert_eq!(to_lf(""), "");
     }
 
     #[test]
-    fn crlf_normalization_idempotent() {
-        let once = normalize_crlf("x\ny\r\rz");
-        assert_eq!(normalize_crlf(&once), once);
+    fn lf_normalization_idempotent() {
+        let once = to_lf("x\ny\r\rz");
+        assert_eq!(to_lf(&once), once);
+    }
+
+    #[test]
+    fn eol_conversion() {
+        assert_eq!(with_eol("a\nb\n", "\r\n"), "a\r\nb\r\n");
+        assert_eq!(with_eol("a\nb", "\n"), "a\nb");
+        assert_eq!(to_lf(&with_eol("x\ny", "\r\n")), "x\ny");
     }
 
     #[test]
