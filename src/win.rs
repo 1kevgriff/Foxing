@@ -22,6 +22,8 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const FIND_BUF_LEN: usize = 256;
+/// EM_SETLIMITTEXT(0) maximum for a multiline EDIT control.
+const EDIT_MAX_CHARS: usize = 0x7FFF_FFFE;
 
 struct App {
     main: Cell<HWND>,
@@ -164,7 +166,27 @@ unsafe fn load_file(path: PathBuf) {
             // The EDIT control requires CRLF.
             let edit = app(|a| a.edit.get());
             let s = wide(&text::with_eol(&body, "\r\n"));
+            drop(body);
+            let units = s.len() - 1;
+            if units > EDIT_MAX_CHARS {
+                error_box(&format!(
+                    "{} is too large to open ({units} characters; the limit is {EDIT_MAX_CHARS}).",
+                    path.display()
+                ));
+                return;
+            }
             SetWindowTextW(edit, s.as_ptr());
+            // The control can fail silently (out of memory); never adopt a path whose
+            // contents didn't load, or Save would overwrite the file with partial text.
+            if GetWindowTextLengthW(edit) as usize != units {
+                SetWindowTextW(edit, w!(""));
+                set_doc(Document::new());
+                error_box(&format!(
+                    "{} could not be loaded completely.",
+                    path.display()
+                ));
+                return;
+            }
             SendMessageW(edit, EM_EMPTYUNDOBUFFER, 0, 0);
             set_sel(edit, 0, 0);
             set_doc(doc);
