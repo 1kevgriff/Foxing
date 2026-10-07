@@ -91,6 +91,13 @@ pub unsafe fn height(hwnd: HWND) -> i32 {
     })
 }
 
+pub unsafe fn set_theme(hwnd: HWND, theme: Theme) {
+    if let Some(s) = state(hwnd) {
+        s.borrow_mut().theme = theme;
+    }
+    InvalidateRect(hwnd, null(), 0);
+}
+
 pub unsafe fn set_dpi(hwnd: HWND, dpi: u32) {
     if let Some(s) = state(hwnd) {
         let mut s = s.borrow_mut();

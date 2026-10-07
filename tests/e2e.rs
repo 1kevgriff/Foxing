@@ -23,6 +23,7 @@ const EDT1: i32 = 0x480; // Find dialog's text box
 const MB_GETCHECK: u32 = WM_APP + 1;
 const MB_GETOPEN: u32 = WM_APP + 2;
 const MB_ISACTIVE: u32 = WM_APP + 3;
+const VM_GETBG: u32 = WM_APP + 10;
 const VK_MENU: usize = 0x12;
 const VK_RIGHT: usize = 0x27;
 const VK_DOWN: usize = 0x28;
@@ -449,6 +450,21 @@ fn menu_mouse_click_opens_and_closes() {
     click(app.menubar(), 8, 8);
     assert_eq!(app.menu_open(), -1);
     assert!(!app.menu_active());
+}
+
+#[test]
+fn theme_menu_switches_light_and_dark() {
+    let app = App::launch(None);
+    let bg = || unsafe { SendMessageW(app.edit(), VM_GETBG, 0, 0) as u32 };
+    // Starts on "System Theme" (light or dark depending on this machine).
+    assert!(app.menu_checked(ID_THEME_SYSTEM));
+    assert!(bg() == 0xFFFFFF || bg() == 0x1E1E1E);
+    app.cmd(ID_THEME_DARK);
+    assert_eq!(bg(), 0x1E1E1E);
+    assert!(app.menu_checked(ID_THEME_DARK) && !app.menu_checked(ID_THEME_SYSTEM));
+    app.cmd(ID_THEME_LIGHT);
+    assert_eq!(bg(), 0xFFFFFF);
+    assert!(app.menu_checked(ID_THEME_LIGHT) && !app.menu_checked(ID_THEME_DARK));
 }
 
 #[test]

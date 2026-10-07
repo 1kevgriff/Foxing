@@ -24,3 +24,6 @@ pub const ID_FIND_NEXT: u16 = 1107;
 pub const ID_WRAP: u16 = 1201;
 
 pub const ID_STATUS_BAR: u16 = 1301;
+pub const ID_THEME_SYSTEM: u16 = 1302;
+pub const ID_THEME_LIGHT: u16 = 1303;
+pub const ID_THEME_DARK: u16 = 1304;

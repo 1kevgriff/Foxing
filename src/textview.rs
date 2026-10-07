@@ -274,6 +274,19 @@ pub unsafe fn set_buffer(hwnd: HWND, buf: Buffer) {
     finish(hwnd, sh);
 }
 
+pub unsafe fn set_theme(hwnd: HWND, theme: Theme) {
+    let sh = shared(hwnd).expect("text view state");
+    {
+        let mut v = sh.view.borrow_mut();
+        v.theme = theme;
+        v.last = None;
+    }
+    finish(hwnd, sh);
+}
+
+/// Automation: returns the text background color (0xRRGGBB).
+pub const VM_GETBG: u32 = WM_APP + 10;
+
 pub unsafe fn set_wrap(hwnd: HWND, wrap: bool) {
     let sh = shared(hwnd).expect("text view state");
     sh.view.borrow_mut().ed.set_wrap(wrap);
@@ -981,6 +994,10 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         EM_REPLACESEL => {
             v.ed.insert(&wide_arg(lp));
             0
+        }
+        VM_GETBG => {
+            v.quiet = true;
+            v.theme.text_bg as LRESULT
         }
         EM_GETFIRSTVISIBLELINE => {
             v.quiet = true;

@@ -23,6 +23,8 @@ paper.
 - Undo (`Ctrl+Z`) and redo (`Ctrl+Y`)
 - Find (`Ctrl+F`) and Find Next (`F3`)
 - Word wrap (Format menu)
+- Status bar with line/column, line count, line ending, and encoding
+- Light and dark themes, following the Windows setting by default (View menu)
 - Open from the command line (`foxing todo.txt`) or by dragging a file
   onto the window
 - Unsaved-changes prompt on close

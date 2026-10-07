@@ -6,6 +6,7 @@ use crate::statusview;
 use crate::textview;
 use foxing::document::Document;
 use foxing::ui::menu::{Menu, MenuItem, MenuKey};
+use foxing::ui::Theme;
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::mem::{size_of, zeroed};
@@ -14,9 +15,11 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::w;
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -44,6 +47,8 @@ struct App {
     find: Cell<*mut FINDREPLACEW>,
     status: Cell<HWND>,
     menubar: Cell<HWND>,
+    /// ID_THEME_SYSTEM, ID_THEME_LIGHT, or ID_THEME_DARK.
+    theme_choice: Cell<u16>,
 }
 
 thread_local! {
@@ -58,6 +63,7 @@ thread_local! {
         find: Cell::new(null_mut()),
         status: Cell::new(null_mut()),
         menubar: Cell::new(null_mut()),
+        theme_choice: Cell::new(ID_THEME_SYSTEM),
     } };
 }
 
@@ -191,6 +197,54 @@ unsafe fn layout_children(hwnd: HWND) {
         MoveWindow(status, 0, bottom.max(0), rc.right, h, 1);
     }
     MoveWindow(edit, 0, top, rc.right, (bottom - top).max(0), 1);
+}
+
+/// Windows "app mode" setting: true when apps should be dark.
+unsafe fn system_prefers_dark() -> bool {
+    let mut value: u32 = 1;
+    let mut size = size_of::<u32>() as u32;
+    let r = RegGetValueW(
+        HKEY_CURRENT_USER,
+        w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        w!("AppsUseLightTheme"),
+        RRF_RT_REG_DWORD,
+        null_mut(),
+        &mut value as *mut u32 as *mut _,
+        &mut size,
+    );
+    r == ERROR_SUCCESS && value == 0
+}
+
+/// Resolves the theme choice and applies it to every component and the title bar.
+unsafe fn apply_theme() {
+    let (main, edit, status, bar, choice) = app(|a| {
+        (
+            a.main.get(),
+            a.edit.get(),
+            a.status.get(),
+            a.menubar.get(),
+            a.theme_choice.get(),
+        )
+    });
+    let dark = match choice {
+        ID_THEME_DARK => true,
+        ID_THEME_LIGHT => false,
+        _ => system_prefers_dark(),
+    };
+    let theme = if dark { Theme::DARK } else { Theme::LIGHT };
+    textview::set_theme(edit, theme);
+    statusview::set_theme(status, theme);
+    menuview::set_theme(bar, theme);
+    let on: i32 = dark as i32; // Win32 BOOL
+    DwmSetWindowAttribute(
+        main,
+        DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+        &on as *const i32 as *const _,
+        size_of::<i32>() as u32,
+    );
+    for id in [ID_THEME_SYSTEM, ID_THEME_LIGHT, ID_THEME_DARK] {
+        menuview::set_checked(bar, id, id == choice);
+    }
 }
 
 unsafe fn toggle_status_bar() {
@@ -401,7 +455,16 @@ fn menus() -> Vec<Menu> {
             ],
         ),
         Menu::new("F&ormat", vec![it("&Word Wrap", "", ID_WRAP)]),
-        Menu::new("&View", vec![status_bar]),
+        Menu::new(
+            "&View",
+            vec![
+                status_bar,
+                sep(),
+                it("S&ystem Theme", "", ID_THEME_SYSTEM),
+                it("&Light Theme", "", ID_THEME_LIGHT),
+                it("&Dark Theme", "", ID_THEME_DARK),
+            ],
+        ),
     ]
 }
 
@@ -455,6 +518,10 @@ unsafe fn on_command(id: u16, code: u16) {
         ID_FIND_NEXT => find_next(),
         ID_WRAP => toggle_wrap(),
         ID_STATUS_BAR => toggle_status_bar(),
+        ID_THEME_SYSTEM | ID_THEME_LIGHT | ID_THEME_DARK => {
+            app(|a| a.theme_choice.set(id));
+            apply_theme();
+        }
         _ => {}
     }
 }
@@ -496,6 +563,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             layout_children(hwnd);
             update_status();
+            // Before the window is shown, so a dark start never flashes light.
+            apply_theme();
             0
         }
         WM_SIZE => {
@@ -537,6 +606,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ACTIVATE | WM_MOVE => {
             if msg == WM_MOVE || loword(wp) as u32 == WA_INACTIVE {
                 menuview::close(app(|a| a.menubar.get()));
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_SETTINGCHANGE => {
+            // Sent when the user flips Windows between light and dark app mode.
+            let topic = lp as *const u16;
+            let is_color = !topic.is_null() && {
+                let want: Vec<u16> = "ImmersiveColorSet".encode_utf16().collect();
+                (0..want.len()).all(|i| *topic.add(i) == want[i]) && *topic.add(want.len()) == 0
+            };
+            if is_color && app(|a| a.theme_choice.get()) == ID_THEME_SYSTEM {
+                apply_theme();
             }
             DefWindowProcW(hwnd, msg, wp, lp)
         }

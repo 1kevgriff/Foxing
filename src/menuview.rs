@@ -125,6 +125,18 @@ pub unsafe fn set_dpi(hwnd: HWND, dpi: u32) {
     InvalidateRect(hwnd, null(), 0);
 }
 
+pub unsafe fn set_theme(hwnd: HWND, theme: Theme) {
+    let popup = state(hwnd).map(|s| {
+        let mut s = s.borrow_mut();
+        s.theme = theme;
+        s.popup
+    });
+    InvalidateRect(hwnd, null(), 0);
+    if let Some(p) = popup.filter(|p| !p.is_null()) {
+        InvalidateRect(p, null(), 0);
+    }
+}
+
 pub unsafe fn set_checked(hwnd: HWND, id: u16, on: bool) {
     if let Some(s) = state(hwnd) {
         s.borrow_mut().bar.set_checked(id, on);
