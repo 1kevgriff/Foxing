@@ -1,7 +1,11 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod gdi;
+#[cfg(windows)]
 mod ids;
+#[cfg(windows)]
+mod statusview;
 #[cfg(windows)]
 mod textview;
 #[cfg(windows)]
