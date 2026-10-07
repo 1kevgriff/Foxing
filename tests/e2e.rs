@@ -24,6 +24,9 @@ const MB_GETCHECK: u32 = WM_APP + 1;
 const MB_GETOPEN: u32 = WM_APP + 2;
 const MB_ISACTIVE: u32 = WM_APP + 3;
 const VM_GETBG: u32 = WM_APP + 10;
+const FL_GETCOUNT: u32 = WM_APP + 20;
+const FL_ACTIVATE: u32 = WM_APP + 21;
+const FL_GETSEL: u32 = WM_APP + 22;
 const VK_MENU: usize = 0x12;
 const VK_RIGHT: usize = 0x27;
 const VK_DOWN: usize = 0x28;
@@ -213,6 +216,27 @@ impl App {
     /// Posts keyboard input through Foxing's message loop, as typing would.
     fn post(&self, msg: u32, wp: usize, lp: isize) {
         unsafe { PostMessageW(self.edit(), msg, wp, lp) };
+    }
+
+    fn folder_view(&self) -> HWND {
+        unsafe { GetDlgItem(self.hwnd, IDC_FOLDER as i32) }
+    }
+
+    fn folder_count(&self) -> usize {
+        unsafe { SendMessageW(self.folder_view(), FL_GETCOUNT, 0, 0) as usize }
+    }
+
+    fn folder_sel(&self) -> isize {
+        unsafe { SendMessageW(self.folder_view(), FL_GETSEL, 0, 0) }
+    }
+
+    fn folder_activate(&self, i: usize) {
+        unsafe { SendMessageW(self.folder_view(), FL_ACTIVATE, i, 0) };
+    }
+
+    fn wait_title(&self, want: &str) {
+        wait_for(5000, || (self.title() == want).then_some(()))
+            .unwrap_or_else(|| panic!("title {want:?}, got {:?}", self.title()));
     }
 
     fn alive(&mut self) -> bool {
@@ -501,6 +525,78 @@ fn settings_are_remembered_between_launches() {
         unsafe { SendMessageW(app.edit(), VM_GETBG, 0, 0) } as u32,
         0x1E1E1E
     );
+}
+
+/// A fresh folder: two text files, plus things the sidebar must skip.
+fn sample_folder(name: &str) -> PathBuf {
+    let d = tmp(name);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("sub")).unwrap();
+    std::fs::write(d.join("a.txt"), "alpha").unwrap();
+    std::fs::write(d.join("b.md"), "beta").unwrap();
+    std::fs::write(d.join("image.png"), [0u8, 1, 2]).unwrap();
+    std::fs::write(d.join("sub").join("inner.txt"), "x").unwrap();
+    d
+}
+
+#[test]
+fn folder_from_command_line_lists_text_files() {
+    let d = sample_folder("folder-cli");
+    let app = App::launch(Some(&d));
+    assert_eq!(app.folder_count(), 2);
+    assert_eq!(text_of(app.folder_view()), "a.txt\nb.md");
+    assert_ne!(unsafe { IsWindowVisible(app.folder_view()) }, 0);
+    assert_eq!(app.title(), "Untitled - Foxing");
+    assert_eq!(app.folder_sel(), -1);
+}
+
+#[test]
+fn folder_switching_files_prompts_for_unsaved_changes() {
+    let d = sample_folder("folder-switch");
+    let app = App::launch(Some(&d));
+    app.folder_activate(0);
+    app.wait_title("a.txt - Foxing");
+    assert_eq!(app.text(), "alpha");
+    assert_eq!(app.folder_sel(), 0);
+    app.set_sel(0, 0);
+    unsafe { SendMessageW(app.edit(), WM_CHAR, 'x' as WPARAM, 0) };
+    // Switching away from unsaved changes asks; "Don't Save" switches.
+    app.folder_activate(1);
+    let dlg = app.dialog("Foxing");
+    unsafe { PostMessageW(dlg, WM_COMMAND, IDNO as WPARAM, 0) };
+    app.wait_title("b.md - Foxing");
+    assert_eq!(app.text(), "beta");
+    assert_eq!(app.folder_sel(), 1);
+    assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "alpha");
+}
+
+#[test]
+fn folder_new_file_creates_and_opens_it() {
+    let d = sample_folder("folder-new");
+    let app = App::launch(Some(&d));
+    app.cmd(ID_NEW_IN_FOLDER);
+    app.wait_title("Untitled.txt - Foxing");
+    assert!(d.join("Untitled.txt").exists());
+    assert_eq!(app.folder_count(), 3);
+    assert_eq!(app.folder_sel(), 2, "a.txt, b.md, Untitled.txt");
+}
+
+#[test]
+fn folder_is_remembered_and_can_be_closed() {
+    let d = sample_folder("folder-remember");
+    let ini = tmp("folder-remember.ini");
+    let _ = std::fs::remove_file(&ini);
+    let mut app = App::launch_with(Some(&d), &ini);
+    unsafe { PostMessageW(app.hwnd, WM_CLOSE, 0, 0) };
+    wait_for(5000, || (!app.alive()).then_some(())).expect("clean exit");
+
+    let app = App::launch_with(None, &ini);
+    assert_eq!(app.folder_count(), 2, "last folder reopened");
+    app.cmd(ID_CLOSE_FOLDER);
+    assert_eq!(unsafe { IsWindowVisible(app.folder_view()) }, 0);
+    assert!(!std::fs::read_to_string(&ini)
+        .unwrap()
+        .contains("last_folder"));
 }
 
 #[test]

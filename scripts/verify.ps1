@@ -2,9 +2,10 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-# Raised 300 -> 400 KB with the custom text engine (#14): buffer, editor, view, memchr SIMD.
-$MaxBytes = 400KB
-$AllowedDlls = 'kernel32', 'user32', 'gdi32', 'comdlg32', 'shell32', 'comctl32', 'imm32', 'dwmapi', 'advapi32', 'ntdll', 'api-ms-win-core-*'
+# 300 -> 400 KB: custom text engine (#14). 400 -> 512 KB: custom UI (#19), settings (#24),
+# folder sidebar + picker (#10), with room for UI Automation (#25).
+$MaxBytes = 512KB
+$AllowedDlls = 'kernel32', 'user32', 'gdi32', 'comdlg32', 'shell32', 'comctl32', 'imm32', 'dwmapi', 'advapi32', 'ole32', 'combase', 'ntdll', 'api-ms-win-core-*'
 $results = [System.Collections.Generic.List[object]]::new()
 
 function Step($name, [scriptblock]$body) {
@@ -20,7 +21,8 @@ function Step($name, [scriptblock]$body) {
 }
 
 function Run([string]$exe, [string[]]$argv) {
-    & $exe @argv
+    # Stream output to the console (not into the step result) so failures are visible.
+    & $exe @argv | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$exe $argv exited $LASTEXITCODE" }
 }
 

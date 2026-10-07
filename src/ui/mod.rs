@@ -3,6 +3,7 @@
 //! Components lay themselves out and emit a [`DrawList`]; each platform renders the list
 //! and supplies text measurement through [`Measure`]. Nothing here touches an OS API.
 
+pub mod list;
 pub mod menu;
 pub mod scroll;
 pub mod status;

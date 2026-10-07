@@ -3,6 +3,7 @@
 pub const IDC_EDIT: u16 = 100;
 pub const IDC_STATUS: u16 = 101;
 pub const IDC_MENUBAR: u16 = 102;
+pub const IDC_FOLDER: u16 = 103;
 
 /// Text view notification (WM_COMMAND high word): caret or selection moved.
 pub const VN_CARET: u16 = 0x8001;
@@ -12,6 +13,9 @@ pub const ID_OPEN: u16 = 1002;
 pub const ID_SAVE: u16 = 1003;
 pub const ID_SAVE_AS: u16 = 1004;
 pub const ID_EXIT: u16 = 1005;
+pub const ID_OPEN_FOLDER: u16 = 1006;
+pub const ID_NEW_IN_FOLDER: u16 = 1007;
+pub const ID_CLOSE_FOLDER: u16 = 1008;
 
 pub const ID_UNDO: u16 = 1101;
 pub const ID_CUT: u16 = 1102;

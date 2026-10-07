@@ -1,10 +1,12 @@
 //! Win32 shell: windows, menus, dialogs. Document and text logic live in the library.
 
 use crate::ids::*;
+use crate::listview;
 use crate::menuview;
 use crate::statusview;
 use crate::textview;
 use foxing::document::Document;
+use foxing::folder;
 use foxing::settings::{Settings, ThemeChoice, WindowRect};
 use foxing::ui::menu::{Menu, MenuItem, MenuKey};
 use foxing::ui::Theme;
@@ -48,6 +50,10 @@ struct App {
     find: Cell<*mut FINDREPLACEW>,
     status: Cell<HWND>,
     menubar: Cell<HWND>,
+    folder_view: Cell<HWND>,
+    /// Open folder and its listed files (same order as the sidebar).
+    folder: RefCell<Option<PathBuf>>,
+    files: RefCell<Vec<PathBuf>>,
     /// ID_THEME_SYSTEM, ID_THEME_LIGHT, or ID_THEME_DARK.
     theme_choice: Cell<u16>,
     /// Loaded at startup; updated and saved whenever a remembered choice changes.
@@ -66,6 +72,9 @@ thread_local! {
         find: Cell::new(null_mut()),
         status: Cell::new(null_mut()),
         menubar: Cell::new(null_mut()),
+        folder_view: Cell::new(null_mut()),
+        folder: RefCell::new(None),
+        files: RefCell::new(Vec::new()),
         theme_choice: Cell::new(ID_THEME_SYSTEM),
         settings: RefCell::new(Settings {
             theme: ThemeChoice::System,
@@ -140,6 +149,105 @@ unsafe fn set_doc(doc: Document) {
     app(|a| *a.doc.borrow_mut() = doc);
     update_title();
     update_status();
+    sync_folder_selection();
+}
+
+// ---- folder sidebar ----
+
+/// Highlights the open document in the sidebar (or nothing if it's elsewhere).
+unsafe fn sync_folder_selection() {
+    let view = app(|a| a.folder_view.get());
+    if view.is_null() {
+        return;
+    }
+    let current = app(|a| a.doc.borrow().path().map(|p| p.to_path_buf()));
+    let idx = current.and_then(|c| app(|a| a.files.borrow().iter().position(|f| *f == c)));
+    listview::set_selected(view, idx);
+}
+
+/// Re-reads the open folder (cheap; runs when the window regains focus).
+unsafe fn refresh_folder() {
+    let Some(dir) = app(|a| a.folder.borrow().clone()) else {
+        return;
+    };
+    let files = folder::list(&dir).unwrap_or_default();
+    let names = files.iter().map(|f| folder::file_name(f)).collect();
+    let header = folder::file_name(&dir);
+    let header = if header.is_empty() {
+        dir.display().to_string()
+    } else {
+        header
+    };
+    app(|a| *a.files.borrow_mut() = files);
+    listview::set_items(app(|a| a.folder_view.get()), &header, names);
+    sync_folder_selection();
+}
+
+unsafe fn open_folder(dir: PathBuf) {
+    if !dir.is_dir() {
+        error_box(&format!("{} is not a folder.", dir.display()));
+        return;
+    }
+    let (main, view) = app(|a| (a.main.get(), a.folder_view.get()));
+    app(|a| {
+        *a.folder.borrow_mut() = Some(dir.clone());
+        a.settings.borrow_mut().last_folder = Some(dir);
+    });
+    refresh_folder();
+    ShowWindow(view, SW_SHOW);
+    layout_children(main);
+    save_settings();
+}
+
+unsafe fn close_folder() {
+    let (main, view) = app(|a| (a.main.get(), a.folder_view.get()));
+    app(|a| {
+        *a.folder.borrow_mut() = None;
+        a.files.borrow_mut().clear();
+        a.settings.borrow_mut().last_folder = None;
+    });
+    ShowWindow(view, SW_HIDE);
+    layout_children(main);
+    save_settings();
+}
+
+/// A sidebar row was activated: open that file (after the unsaved-changes prompt).
+unsafe fn open_from_folder() {
+    let view = app(|a| a.folder_view.get());
+    let Some(path) =
+        listview::selected(view).and_then(|i| app(|a| a.files.borrow().get(i).cloned()))
+    else {
+        return;
+    };
+    let current = app(|a| a.doc.borrow().path().map(|p| p.to_path_buf()));
+    if current.as_ref() == Some(&path) {
+        return;
+    }
+    if confirm_discard() {
+        load_file(path);
+    } else {
+        sync_folder_selection();
+    }
+}
+
+unsafe fn new_in_folder() {
+    let Some(dir) = app(|a| a.folder.borrow().clone()) else {
+        if let Some(d) = crate::folderpick::pick_folder(app(|a| a.main.get())) {
+            open_folder(d);
+            new_in_folder();
+        }
+        return;
+    };
+    if !confirm_discard() {
+        return;
+    }
+    let path = folder::new_file_path(&dir);
+    if let Err(e) = std::fs::write(&path, "") {
+        error_box(&format!("Cannot create {}:\n{e}", path.display()));
+        return;
+    }
+    refresh_folder();
+    load_file(path);
 }
 
 /// 12345678 -> "12,345,678".
@@ -207,7 +315,22 @@ unsafe fn layout_children(hwnd: HWND) {
         bottom -= h;
         MoveWindow(status, 0, bottom.max(0), rc.right, h, 1);
     }
-    MoveWindow(edit, 0, top, rc.right, (bottom - top).max(0), 1);
+    let view = app(|a| a.folder_view.get());
+    let left = if !view.is_null() && GetWindowLongW(view, GWL_STYLE) as u32 & WS_VISIBLE != 0 {
+        let w = listview::width(view).min(rc.right / 2);
+        MoveWindow(view, 0, top, w, (bottom - top).max(0), 1);
+        w
+    } else {
+        0
+    };
+    MoveWindow(
+        edit,
+        left,
+        top,
+        (rc.right - left).max(0),
+        (bottom - top).max(0),
+        1,
+    );
 }
 
 /// Windows "app mode" setting: true when apps should be dark.
@@ -246,6 +369,7 @@ unsafe fn apply_theme() {
     textview::set_theme(edit, theme);
     statusview::set_theme(status, theme);
     menuview::set_theme(bar, theme);
+    listview::set_theme(app(|a| a.folder_view.get()), theme);
     let on: i32 = dark as i32; // Win32 BOOL
     DwmSetWindowAttribute(
         main,
@@ -407,6 +531,7 @@ unsafe fn save_to(path: PathBuf) -> bool {
     match saved {
         Ok(()) => {
             update_title();
+            refresh_folder();
             true
         }
         Err(e) => {
@@ -550,6 +675,9 @@ fn menus() -> Vec<Menu> {
             vec![
                 it("&New", "Ctrl+N", ID_NEW),
                 it("&Open...", "Ctrl+O", ID_OPEN),
+                it("Open &Folder...", "Ctrl+Shift+O", ID_OPEN_FOLDER),
+                it("New File in Fol&der", "", ID_NEW_IN_FOLDER),
+                it("&Close Folder", "", ID_CLOSE_FOLDER),
                 it("&Save", "Ctrl+S", ID_SAVE),
                 it("Save &As...", "Ctrl+Shift+S", ID_SAVE_AS),
                 sep(),
@@ -588,6 +716,14 @@ fn menus() -> Vec<Menu> {
 unsafe fn on_command(id: u16, code: u16) {
     let (main, edit) = app(|a| (a.main.get(), a.edit.get()));
     match id {
+        IDC_FOLDER if code == listview::LN_ACTIVATE => open_from_folder(),
+        ID_OPEN_FOLDER => {
+            if let Some(d) = crate::folderpick::pick_folder(main) {
+                open_folder(d);
+            }
+        }
+        ID_NEW_IN_FOLDER => new_in_folder(),
+        ID_CLOSE_FOLDER => close_folder(),
         IDC_EDIT => {
             if code == EN_CHANGE as u16 && app(|a| a.doc.borrow_mut().mark_dirty()) {
                 update_title();
@@ -674,10 +810,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let edit = create_edit(hwnd);
             let status = statusview::create(hwnd, IDC_STATUS, &STATUS_WIDTHS);
             let bar = menuview::create(hwnd, IDC_MENUBAR, menus());
+            let folder_view = listview::create(hwnd, IDC_FOLDER);
             app(|a| {
                 a.edit.set(edit);
                 a.status.set(status);
                 a.menubar.set(bar);
+                a.folder_view.set(folder_view);
             });
             layout_children(hwnd);
             update_status();
@@ -709,6 +847,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             SendMessageW(app(|a| a.edit.get()), WM_SETFONT, font as WPARAM, 1);
             statusview::set_dpi(app(|a| a.status.get()), hiword(wp) as u32);
             menuview::set_dpi(app(|a| a.menubar.get()), hiword(wp) as u32);
+            listview::set_dpi(app(|a| a.folder_view.get()), hiword(wp) as u32);
             DeleteObject(old);
             SetWindowPos(
                 hwnd,
@@ -725,6 +864,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_ACTIVATE | WM_MOVE => {
             if msg == WM_MOVE || loword(wp) as u32 == WA_INACTIVE {
                 menuview::close(app(|a| a.menubar.get()));
+            } else {
+                // Pick up files added or removed while we were in the background.
+                refresh_folder();
             }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
@@ -760,6 +902,7 @@ pub fn run() {
         textview::register();
         statusview::register();
         menuview::register();
+        listview::register();
         let hinst = GetModuleHandleW(null());
         let class = w!("foxing");
         let wc = WNDCLASSW {
@@ -788,8 +931,17 @@ pub fn run() {
             hinst,
             null(),
         );
-        if let Some(arg) = std::env::args_os().nth(1) {
-            load_file(PathBuf::from(arg));
+        // `foxing <file>` opens a file; `foxing <folder>` opens a folder. With no
+        // argument, the last folder (if any) comes back.
+        match std::env::args_os().nth(1).map(PathBuf::from) {
+            Some(p) if p.is_dir() => open_folder(p),
+            Some(p) => load_file(p),
+            None => {
+                let last = app(|a| a.settings.borrow().last_folder.clone());
+                if let Some(d) = last.filter(|d| d.is_dir()) {
+                    open_folder(d);
+                }
+            }
         }
         show_main(hwnd);
 
@@ -804,6 +956,11 @@ pub fn run() {
                 fVirt: ctrl,
                 key: b'O' as u16,
                 cmd: ID_OPEN,
+            },
+            ACCEL {
+                fVirt: ctrl | FSHIFT,
+                key: b'O' as u16,
+                cmd: ID_OPEN_FOLDER,
             },
             ACCEL {
                 fVirt: ctrl,
