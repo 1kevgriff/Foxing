@@ -314,6 +314,64 @@ fn status_bar_toggle() {
     assert_eq!(app.status_text(1), "Ln 1, Col 1");
 }
 
+fn first_visible(app: &App) -> usize {
+    unsafe { SendMessageW(app.edit(), EM_GETFIRSTVISIBLELINE, 0, 0) as usize }
+}
+
+fn client_size(h: HWND) -> (i32, i32) {
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe { GetClientRect(h, &mut rc) };
+    (rc.right, rc.bottom)
+}
+
+fn click(h: HWND, x: i32, y: i32) {
+    let lp = ((y as u32 as LPARAM) << 16) | (x as u32 & 0xFFFF) as LPARAM;
+    unsafe {
+        SendMessageW(h, WM_LBUTTONDOWN, 1, lp);
+        SendMessageW(h, WM_LBUTTONUP, 0, lp);
+    }
+}
+
+#[test]
+fn custom_scrollbar_pages_drags_and_wheels() {
+    let f = tmp("scroll.txt");
+    let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&f, body).unwrap();
+    let app = App::launch(Some(&f));
+    let edit = app.edit();
+    let (w, h) = client_size(edit);
+    assert_eq!(first_visible(&app), 0);
+
+    // Click the vertical track near the bottom: pages down.
+    click(edit, w - 4, h - 40);
+    let paged = first_visible(&app);
+    assert!(paged > 10, "page down moved to {paged}");
+
+    // Drag the thumb to the very bottom: last page.
+    let lp_at = |y: i32| ((y as u32 as LPARAM) << 16) | ((w - 4) as u32 & 0xFFFF) as LPARAM;
+    unsafe {
+        // Grab whatever is under the pointer at the top after scrolling back up.
+        SendMessageW(edit, WM_VSCROLL, SB_TOP as WPARAM, 0);
+        SendMessageW(edit, WM_LBUTTONDOWN, 1, lp_at(5));
+        SendMessageW(edit, WM_MOUSEMOVE, 1, lp_at(h * 10));
+        SendMessageW(edit, WM_LBUTTONUP, 0, lp_at(h * 10));
+    }
+    let bottom = first_visible(&app);
+    assert!(bottom > 400, "dragged to {bottom}");
+
+    // Wheel up three notches scrolls back toward the top.
+    unsafe { SendMessageW(edit, WM_MOUSEWHEEL, (120usize * 3) << 16, 0) };
+    assert!(first_visible(&app) < bottom);
+
+    // The caret never moved: scrolling isn't editing.
+    assert_eq!(app.status_text(1), "Ln 1, Col 1");
+}
+
 #[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);

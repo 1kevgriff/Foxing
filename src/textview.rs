@@ -2,9 +2,12 @@
 //! editor calls. Also answers the EDIT messages automation relies on (`WM_GETTEXT`,
 //! `EM_GETSEL`, `EM_SETSEL`, `EM_REPLACESEL`, ...) and sends `EN_CHANGE` to its parent.
 
+use crate::gdi::{self, BackBuffer, Gdi};
 use foxing::buffer::Buffer;
 use foxing::document::NATIVE_EOL;
 use foxing::editor::{Editor, Motion};
+use foxing::ui::scroll::{ScrollAction, ScrollBar};
+use foxing::ui::{Cmd, DrawList, Rect, Theme};
 use std::cell::{Cell, RefCell};
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
@@ -15,6 +18,7 @@ use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::*;
 use windows_sys::Win32::UI::Controls::*;
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::Ime::*;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -37,9 +41,77 @@ struct View {
     dragging: bool,
     /// High surrogate waiting for its pair from WM_CHAR.
     high: Option<u16>,
-    /// Back buffer for flicker-free painting.
-    back: HBITMAP,
-    back_size: (i32, i32),
+    gdi: Gdi,
+    back: BackBuffer,
+    theme: Theme,
+    vbar: ScrollBar,
+    hbar: ScrollBar,
+    /// Which scrollbar holds the mouse: Some(true) vertical, Some(false) horizontal.
+    bar_drag: Option<bool>,
+    tracking_leave: bool,
+    /// Set by a handler that changed nothing visible, so no refresh is needed.
+    quiet: bool,
+    /// What was last made visible; `None` forces a full repaint.
+    last: Option<Frame>,
+}
+
+/// The visible state that decides how much to repaint.
+#[derive(Debug, Clone, PartialEq)]
+struct Frame {
+    size: (i32, i32),
+    top: usize,
+    left: usize,
+    rows: usize,
+    wrap: bool,
+    lines: usize,
+    version: u64,
+    edit_line: usize,
+    sel: std::ops::Range<usize>,
+    caret_line: usize,
+    vbar: (u64, u64, u64),
+    hbar: (u64, u64, u64),
+}
+
+impl Frame {
+    fn of(v: &View) -> Frame {
+        Frame {
+            size: (v.width, v.height),
+            top: v.ed.top_line(),
+            left: v.ed.left(),
+            rows: v.ed.view_rows(),
+            wrap: v.ed.wrap(),
+            lines: v.ed.buffer().line_count(),
+            version: v.ed.version(),
+            edit_line: v.ed.last_edit_line(),
+            sel: v.ed.selection(),
+            caret_line: v.ed.buffer().line_of(v.ed.caret()),
+            vbar: v.vbar.state(),
+            hbar: v.hbar.state(),
+        }
+    }
+}
+
+/// Lines to repaint going from `old` to `new`, or `None` for everything. Partial
+/// repaints cover the common typing case: no scroll, no resize, no wrap, no line
+/// count change, no selection, and any edit on the caret's old or new line.
+fn dirty_lines(old: &Frame, new: &Frame) -> Option<Vec<usize>> {
+    let same_view = old.size == new.size
+        && old.top == new.top
+        && old.left == new.left
+        && old.rows == new.rows
+        && !old.wrap
+        && !new.wrap
+        && old.lines == new.lines
+        && old.sel.is_empty()
+        && new.sel.is_empty();
+    if !same_view {
+        return None;
+    }
+    let lines = vec![old.caret_line, new.caret_line];
+    if old.version != new.version && !lines.contains(&new.edit_line) {
+        return None;
+    }
+    Some(lines)
 }
 
 /// Per-window state. Size, focus, and line height live outside the `RefCell` because
@@ -51,6 +123,8 @@ struct Shared {
     focused: Cell<bool>,
     line_h: Cell<i32>,
     stale_layout: Cell<bool>,
+    /// An IME composition is in progress.
+    composing: Cell<bool>,
 }
 
 pub unsafe fn register() {
@@ -70,7 +144,7 @@ pub unsafe fn create(parent: HWND, id: u16) -> HWND {
         0,
         CLASS,
         null(),
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
+        WS_CHILD | WS_VISIBLE,
         0,
         0,
         0,
@@ -91,43 +165,76 @@ fn sync(v: &mut View, sh: &Shared) {
     v.focused = sh.focused.get();
 }
 
-/// What `finish` applies once the view is no longer borrowed.
-struct Plan {
-    vert: SCROLLINFO,
-    horz: SCROLLINFO,
-    caret: Option<(i32, i32)>,
-}
-
-/// Re-lays out if needed, then updates scrollbars, caret, and paint. Safe to call
-/// re-entrantly: it does nothing while the view is borrowed (the outer call finishes).
+/// Lays out, syncs the scrollbars to the editor, positions the caret, and repaints.
+/// Safe to call re-entrantly: it does nothing while the view is borrowed (the outer
+/// call finishes).
 unsafe fn finish(hwnd: HWND, sh: &Shared) {
-    let plan = match sh.view.try_borrow_mut() {
+    let (caret, dirty) = match sh.view.try_borrow_mut() {
         Ok(mut v) => {
             sync(&mut v, sh);
-            if sh.stale_layout.replace(false) {
-                layout(&mut v);
-            }
-            plan(&v)
+            sh.stale_layout.set(false);
+            layout(&mut v);
+            let frame = Frame::of(&v);
+            let dirty = v.last.as_ref().and_then(|old| {
+                let lines = dirty_lines(old, &frame)?;
+                let tr = text_rect(&v);
+                let mut rects: Vec<Rect> = lines
+                    .iter()
+                    .filter(|&&l| l >= frame.top && l < frame.top + frame.rows)
+                    .map(|&l| Rect::new(0, (l - frame.top) as i32 * v.line_h, tr.w, v.line_h))
+                    .collect();
+                if old.vbar != frame.vbar && v.vbar.visible() {
+                    rects.push(vbar_rect(&v));
+                }
+                if old.hbar != frame.hbar && v.hbar.visible() {
+                    rects.push(hbar_rect(&v));
+                }
+                Some(rects)
+            });
+            v.last = Some(frame);
+            (caret_px(&v), dirty)
         }
         Err(_) => return,
     };
-    SetScrollInfo(hwnd, SB_VERT, &plan.vert, 1);
-    SetScrollInfo(hwnd, SB_HORZ, &plan.horz, 1);
     if sh.focused.get() {
-        let (x, y) = plan.caret.unwrap_or((-1000, -1000));
+        let (x, y) = caret.unwrap_or((-1000, -1000));
         SetCaretPos(x, y);
-        let himc = ImmGetContext(hwnd);
-        if !himc.is_null() {
-            let cf = COMPOSITIONFORM {
-                dwStyle: CFS_POINT,
-                ptCurrentPos: POINT { x, y },
-                rcArea: zeroed(),
-            };
-            ImmSetCompositionWindow(himc, &cf);
-            ImmReleaseContext(hwnd, himc);
+        // The IME window only matters while composing; positioning it costs ~0.3 ms,
+        // too much to pay on every keystroke.
+        if sh.composing.get() {
+            place_ime(hwnd, x, y);
         }
     }
-    InvalidateRect(hwnd, null(), 0);
+    match dirty {
+        Some(rects) => {
+            for r in rects {
+                let rc = RECT {
+                    left: r.x,
+                    top: r.y,
+                    right: r.right(),
+                    bottom: r.bottom(),
+                };
+                InvalidateRect(hwnd, &rc, 0);
+            }
+        }
+        None => {
+            InvalidateRect(hwnd, null(), 0);
+        }
+    }
+}
+
+/// Puts the IME composition window at the caret.
+unsafe fn place_ime(hwnd: HWND, x: i32, y: i32) {
+    let himc = ImmGetContext(hwnd);
+    if !himc.is_null() {
+        let cf = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT { x, y },
+            rcArea: zeroed(),
+        };
+        ImmSetCompositionWindow(himc, &cf);
+        ImmReleaseContext(hwnd, himc);
+    }
 }
 
 /// Runs `f` on the view's editor, then refreshes scrollbars, caret, and paint.
@@ -161,6 +268,7 @@ pub unsafe fn set_buffer(hwnd: HWND, buf: Buffer) {
         let wrap = v.ed.wrap();
         v.ed = Editor::new(buf, NATIVE_EOL);
         v.ed.set_wrap(wrap);
+        v.last = None;
     }
     sh.stale_layout.set(true);
     finish(hwnd, sh);
@@ -196,7 +304,7 @@ pub unsafe fn peek<R>(hwnd: HWND, f: impl FnOnce(&Editor) -> R) -> R {
     f(&v.ed)
 }
 
-unsafe fn measure(v: &mut View) {
+unsafe fn measure(hwnd: HWND, v: &mut View) {
     let dc = GetDC(null_mut());
     let old = SelectObject(dc, v.font as HGDIOBJ);
     let mut tm: TEXTMETRICW = zeroed();
@@ -205,167 +313,144 @@ unsafe fn measure(v: &mut View) {
     ReleaseDC(null_mut(), dc);
     v.cell_w = tm.tmAveCharWidth.max(1);
     v.line_h = (tm.tmHeight + tm.tmExternalLeading).max(1);
+    v.gdi = Gdi::new(v.font, v.font, GetDpiForWindow(hwnd).max(96));
 }
 
-/// Pushes the pixel size into the editor's cell grid.
-unsafe fn layout(v: &mut View) {
-    let rows = (v.height / v.line_h).max(1) as usize;
-    let cols = ((v.width - PAD) / v.cell_w).max(1) as usize;
-    v.ed.set_view(rows, cols);
+fn bar_px(v: &View) -> i32 {
+    ScrollBar::thickness(&v.gdi)
 }
 
-/// Scrollbar positions are i32; scale line numbers for documents beyond that.
-fn v_scale(lines: usize) -> usize {
-    lines / (i32::MAX as usize / 2) + 1
+/// The text area: the client area minus visible scrollbars.
+fn text_rect(v: &View) -> Rect {
+    let b = bar_px(v);
+    let w = v.width - if v.vbar.visible() { b } else { 0 };
+    let h = v.height - if v.hbar.visible() { b } else { 0 };
+    Rect::new(0, 0, w.max(0), h.max(0))
 }
 
-fn plan(v: &View) -> Plan {
-    let lines = v.ed.buffer().line_count();
-    let sc = v_scale(lines);
-    let mut vert: SCROLLINFO = unsafe { zeroed() };
-    vert.cbSize = size_of::<SCROLLINFO>() as u32;
-    vert.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    vert.nMax = ((lines - 1) / sc) as i32;
-    vert.nPage = (v.ed.view_rows() / sc).max(1) as u32;
-    vert.nPos = (v.ed.top_line() / sc) as i32;
-
-    let mut horz = vert;
-    let cols = ((v.width - PAD) / v.cell_w).max(1) as usize;
-    if v.ed.wrap() {
-        horz.nMax = 0;
-        horz.nPage = 1;
-        horz.nPos = 0;
-    } else {
-        let width = v.ed.visible_width().max(v.ed.left() + cols);
-        horz.nMax = (width - 1).min(i32::MAX as usize) as i32;
-        horz.nPage = cols as u32;
-        horz.nPos = v.ed.left().min(i32::MAX as usize) as i32;
-    }
-    let caret =
-        v.ed.caret_cell()
-            .map(|(row, col)| (PAD + col as i32 * v.cell_w, row as i32 * v.line_h));
-    Plan { vert, horz, caret }
+fn vbar_rect(v: &View) -> Rect {
+    let b = bar_px(v);
+    let h = v.height - if v.hbar.visible() { b } else { 0 };
+    Rect::new(v.width - b, 0, b, h.max(0))
 }
 
-unsafe fn paint(hwnd: HWND, v: &mut View) {
-    let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
-    let (w, h) = (v.width.max(1), v.height.max(1));
-    if v.back.is_null() || v.back_size != (w, h) {
-        if !v.back.is_null() {
-            DeleteObject(v.back as HGDIOBJ);
+fn hbar_rect(v: &View) -> Rect {
+    let b = bar_px(v);
+    let w = v.width - if v.vbar.visible() { b } else { 0 };
+    Rect::new(0, v.height - b, w.max(0), b)
+}
+
+/// Fits the editor's cell grid to the text area and syncs the scrollbars. Bar
+/// visibility changes the text area, so this settles in at most a few passes.
+fn layout(v: &mut View) {
+    for _ in 0..3 {
+        let before = (v.vbar.visible(), v.hbar.visible());
+        let tr = text_rect(v);
+        let rows = (tr.h / v.line_h).max(1) as usize;
+        let cols = ((tr.w - PAD) / v.cell_w).max(1) as usize;
+        v.ed.set_view(rows, cols);
+        let lines = v.ed.buffer().line_count() as u64;
+        v.vbar.set(lines, rows as u64, v.ed.top_line() as u64);
+        if v.ed.wrap() {
+            v.hbar.set(0, 1, 0);
+        } else {
+            let width = v.ed.visible_width().max(v.ed.left() + 1) as u64;
+            v.hbar.set(
+                width.max(v.ed.left() as u64 + cols as u64 / 2),
+                cols as u64,
+                v.ed.left() as u64,
+            );
         }
-        v.back = CreateCompatibleBitmap(hdc, w, h);
-        v.back_size = (w, h);
+        if (v.vbar.visible(), v.hbar.visible()) == before {
+            break;
+        }
     }
-    let mem = CreateCompatibleDC(hdc);
-    let old_bmp = SelectObject(mem, v.back as HGDIOBJ);
-    let old_font = SelectObject(mem, v.font as HGDIOBJ);
-    let full = RECT {
-        left: 0,
-        top: 0,
-        right: w,
-        bottom: h,
-    };
-    FillRect(mem, &full, GetSysColorBrush(COLOR_WINDOW));
+}
 
-    let sel = v.ed.selection();
-    let len = v.ed.buffer().len();
-    let (text_fg, sel_fg, sel_bg) = (
-        GetSysColor(COLOR_WINDOWTEXT),
-        GetSysColor(COLOR_HIGHLIGHTTEXT),
-        GetSysColor(COLOR_HIGHLIGHT),
+fn caret_px(v: &View) -> Option<(i32, i32)> {
+    v.ed.caret_cell()
+        .map(|(row, col)| (PAD + col as i32 * v.cell_w, row as i32 * v.line_h))
+}
+
+fn paint(hwnd: HWND, v: &mut View) {
+    // Take the buffer out so the closure can read the rest of the view.
+    let mut back = std::mem::replace(&mut v.back, BackBuffer::new());
+    unsafe {
+        back.paint(hwnd, |dc, _, _, clip| {
+            let dl = draw(v, clip);
+            gdi::render(dc, &dl, &v.gdi);
+        })
+    };
+    v.back = back;
+}
+
+/// Draw list for the parts of the view that intersect `clip`.
+fn draw(v: &View, clip: Rect) -> DrawList {
+    let mut dl = DrawList::default();
+    let tr = text_rect(v);
+    let t = v.theme;
+    dl.fill(
+        Rect::new(
+            clip.x,
+            clip.y,
+            clip.w.min(tr.w - clip.x),
+            clip.h.min(tr.h - clip.y),
+        ),
+        t.text_bg,
     );
-    let mut units: Vec<u16> = Vec::new();
-    let mut dx: Vec<i32> = Vec::new();
+    let sel = v.ed.selection();
     for (i, row) in v.ed.visible_rows().iter().enumerate() {
         let y = i as i32 * v.line_h;
+        if !clip.intersects(&Rect::new(0, y, tr.w, v.line_h)) {
+            continue;
+        }
         let glyphs = v.ed.glyphs(row);
         let mut g = 0;
         while g < glyphs.len() {
             let selected = sel.contains(&glyphs[g].at);
             let start = g;
-            units.clear();
-            dx.clear();
+            let mut chars = Vec::new();
+            let mut advances = Vec::new();
             while g < glyphs.len() && sel.contains(&glyphs[g].at) == selected {
                 let gl = glyphs[g];
-                let ch = match gl.ch {
+                chars.push(match gl.ch {
                     '\t' => ' ',
                     c if (c as u32) < 0x20 || c == '\u{7f}' => '\u{FFFD}',
                     c => c,
-                };
-                let mut b = [0u16; 2];
-                let enc = ch.encode_utf16(&mut b);
-                units.extend_from_slice(enc);
-                dx.push(gl.cells as i32 * v.cell_w);
-                if enc.len() == 2 {
-                    dx.push(0);
-                }
+                });
+                advances.push(gl.cells as i32 * v.cell_w);
                 g += 1;
             }
-            let x = PAD + glyphs[start].col as i32 * v.cell_w;
-            let right = PAD + (glyphs[g - 1].col + glyphs[g - 1].cells) as i32 * v.cell_w;
-            let rc = RECT {
-                left: x,
-                top: y,
-                right,
-                bottom: y + v.line_h,
-            };
-            if selected {
-                SetTextColor(mem, sel_fg);
-                SetBkColor(mem, sel_bg);
-                ExtTextOutW(
-                    mem,
-                    x,
-                    y,
-                    ETO_OPAQUE,
-                    &rc,
-                    units.as_ptr(),
-                    units.len() as u32,
-                    dx.as_ptr(),
-                );
-            } else {
-                SetTextColor(mem, text_fg);
-                SetBkMode(mem, TRANSPARENT as i32);
-                ExtTextOutW(
-                    mem,
-                    x,
-                    y,
-                    0,
-                    null(),
-                    units.as_ptr(),
-                    units.len() as u32,
-                    dx.as_ptr(),
-                );
-                SetBkMode(mem, OPAQUE as i32);
-            }
+            dl.cmds.push(Cmd::Glyphs {
+                x: PAD + glyphs[start].col as i32 * v.cell_w,
+                y,
+                color: if selected { t.sel_fg } else { t.text_fg },
+                bg: selected.then_some((t.sel_bg, v.line_h)),
+                chars,
+                advances,
+            });
         }
         // Show a selected line break as one highlighted cell after the text.
         let line_end = row.range.end;
-        let has_break = line_end < len && v.ed.buffer().line_range(row.line).end == line_end;
-        if has_break && sel.start <= line_end && sel.end > line_end {
+        if row.brk && sel.start <= line_end && sel.end > line_end {
             let col = glyphs.last().map_or(0, |gl| gl.col + gl.cells) as i32;
-            let first_row =
-                glyphs.is_empty() && row.range.start > v.ed.buffer().line_start(row.line);
-            if !first_row {
-                let rc = RECT {
-                    left: PAD + col * v.cell_w,
-                    top: y,
-                    right: PAD + (col + 1) * v.cell_w,
-                    bottom: y + v.line_h,
-                };
-                let brush = CreateSolidBrush(sel_bg);
-                FillRect(mem, &rc, brush);
-                DeleteObject(brush as HGDIOBJ);
-            }
+            dl.fill(
+                Rect::new(PAD + col * v.cell_w, y, v.cell_w, v.line_h),
+                t.sel_bg,
+            );
         }
     }
-
-    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old_font);
-    SelectObject(mem, old_bmp);
-    DeleteDC(mem);
-    EndPaint(hwnd, &ps);
+    if v.vbar.visible() && clip.intersects(&vbar_rect(v)) {
+        v.vbar.paint(vbar_rect(v), &t, &v.gdi, &mut dl);
+    }
+    if v.hbar.visible() && clip.intersects(&hbar_rect(v)) {
+        v.hbar.paint(hbar_rect(v), &t, &v.gdi, &mut dl);
+    }
+    if v.vbar.visible() && v.hbar.visible() {
+        let b = bar_px(v);
+        dl.fill(Rect::new(v.width - b, v.height - b, b, b), t.scroll_track);
+    }
+    dl
 }
 
 /// Buffer offset under a client point, clamped into the viewport.
@@ -373,6 +458,19 @@ fn hit(v: &View, x: i32, y: i32) -> usize {
     let row = (y.max(0) / v.line_h) as usize;
     let col = (((x - PAD).max(0) + v.cell_w / 2) / v.cell_w) as usize;
     v.ed.offset_at(row.min(v.ed.view_rows().saturating_sub(1)), col)
+}
+
+/// Which scrollbar is under the point in `lp`: `Some(true)` vertical, `Some(false)`
+/// horizontal.
+fn bar_hit(v: &View, lp: LPARAM) -> Option<bool> {
+    let (x, y) = lparam_point(lp);
+    if v.vbar.visible() && vbar_rect(v).contains(x, y) {
+        Some(true)
+    } else if v.hbar.visible() && hbar_rect(v).contains(x, y) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn lparam_point(lp: LPARAM) -> (i32, i32) {
@@ -516,6 +614,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             focused: Cell::new(false),
             line_h: Cell::new(16),
             stale_layout: Cell::new(false),
+            composing: Cell::new(false),
             view: RefCell::new(View {
                 ed: Editor::new(Buffer::new(), NATIVE_EOL),
                 font: GetStockObject(SYSTEM_FIXED_FONT) as HFONT,
@@ -526,8 +625,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 focused: false,
                 dragging: false,
                 high: None,
-                back: null_mut(),
-                back_size: (0, 0),
+                gdi: Gdi::new(
+                    GetStockObject(SYSTEM_FIXED_FONT) as HFONT,
+                    GetStockObject(SYSTEM_FIXED_FONT) as HFONT,
+                    GetDpiForWindow(GetParent(hwnd)).max(96),
+                ),
+                back: BackBuffer::new(),
+                theme: Theme::LIGHT,
+                vbar: ScrollBar::new(true),
+                hbar: ScrollBar::new(false),
+                bar_drag: None,
+                tracking_leave: false,
+                quiet: false,
+                last: None,
             }),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(view) as isize);
@@ -539,11 +649,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     if msg == WM_NCDESTROY {
         let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Shared;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        let sh = Box::from_raw(p);
-        let back = sh.view.borrow().back;
-        if !back.is_null() {
-            DeleteObject(back as HGDIOBJ);
-        }
+        drop(Box::from_raw(p));
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 
@@ -564,6 +670,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             finish(hwnd, sh);
             return 0;
         }
+        WM_IME_STARTCOMPOSITION => {
+            sh.composing.set(true);
+            finish(hwnd, sh);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        WM_IME_ENDCOMPOSITION => {
+            sh.composing.set(false);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
         WM_KILLFOCUS => {
             sh.focused.set(false);
             DestroyCaret();
@@ -580,13 +695,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let r = handle(hwnd, &mut v, msg, wp, lp);
             sh.line_h.set(v.line_h);
             let after = (v.ed.version(), v.ed.anchor(), v.ed.caret());
-            (r, after.0 != before.0, after != before)
+            let read_only = matches!(
+                msg,
+                WM_PAINT | WM_GETTEXT | WM_GETTEXTLENGTH | EM_GETSEL | EM_CANUNDO | WM_GETFONT
+            );
+            let quiet = std::mem::take(&mut v.quiet) || read_only;
+            (r.map(|r| (r, quiet)), after.0 != before.0, after != before)
         }
         Err(_) => (None, false, false),
     };
     match result {
-        Some(r) => {
-            if msg != WM_PAINT {
+        Some((r, quiet)) => {
+            if !quiet {
                 finish(hwnd, sh);
             }
             if changed && msg != WM_SETTEXT {
@@ -610,7 +730,7 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         }
         WM_SETFONT => {
             v.font = wp as HFONT;
-            measure(v);
+            measure(hwnd, v);
             layout(v);
             if v.focused {
                 DestroyCaret();
@@ -652,6 +772,91 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             }
             0
         }
+        WM_LBUTTONDOWN if bar_hit(v, lp).is_some() => {
+            let (x, y) = lparam_point(lp);
+            let vertical = bar_hit(v, lp) == Some(true);
+            let (rect, page) = if vertical {
+                (vbar_rect(v), v.ed.view_rows().max(2) as i64 - 1)
+            } else {
+                (hbar_rect(v), (text_rect(v).w / v.cell_w).max(1) as i64)
+            };
+            let bar = if vertical { &mut v.vbar } else { &mut v.hbar };
+            let step = match bar.mouse_down(rect, &v.gdi, x, y) {
+                Some(ScrollAction::PageBack) => -page,
+                Some(ScrollAction::PageForward) => page,
+                Some(ScrollAction::Grab) => {
+                    v.bar_drag = Some(vertical);
+                    SetCapture(hwnd);
+                    0
+                }
+                None => 0,
+            };
+            if vertical {
+                v.ed.scroll_rows(step);
+            } else {
+                v.ed.scroll_cols(step);
+            }
+            0
+        }
+        WM_MOUSEMOVE if v.bar_drag.is_some() => {
+            let (x, y) = lparam_point(lp);
+            if v.bar_drag == Some(true) {
+                let r = vbar_rect(v);
+                if let Some(pos) = v.vbar.mouse_move(r, &v.gdi, x, y) {
+                    v.ed.scroll_to_line(pos as usize);
+                }
+            } else {
+                let r = hbar_rect(v);
+                if let Some(pos) = v.hbar.mouse_move(r, &v.gdi, x, y) {
+                    v.ed.set_left(pos as usize);
+                }
+            }
+            0
+        }
+        WM_LBUTTONUP | WM_CAPTURECHANGED if v.bar_drag.is_some() => {
+            v.bar_drag = None;
+            v.vbar.mouse_up();
+            v.hbar.mouse_up();
+            if msg == WM_LBUTTONUP {
+                ReleaseCapture();
+            }
+            0
+        }
+        WM_MOUSEMOVE if !v.dragging => {
+            let (x, y) = lparam_point(lp);
+            let vh = v.vbar.visible() && v.vbar.thumb(vbar_rect(v), &v.gdi).contains(x, y);
+            let hh = v.hbar.visible() && v.hbar.thumb(hbar_rect(v), &v.gdi).contains(x, y);
+            let changed = v.vbar.set_hot(vh) | v.hbar.set_hot(hh);
+            if (vh || hh) && !v.tracking_leave {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                v.tracking_leave = TrackMouseEvent(&mut tme) != 0;
+            }
+            v.quiet = !changed;
+            0
+        }
+        WM_MOUSELEAVE => {
+            v.tracking_leave = false;
+            v.vbar.set_hot(false);
+            v.hbar.set_hot(false);
+            0
+        }
+        WM_SETCURSOR if (lp & 0xFFFF) as u32 == HTCLIENT => {
+            let mut pt: POINT = zeroed();
+            GetCursorPos(&mut pt);
+            ScreenToClient(hwnd, &mut pt);
+            let over_bar = (v.vbar.visible() && vbar_rect(v).contains(pt.x, pt.y))
+                || (v.hbar.visible() && hbar_rect(v).contains(pt.x, pt.y));
+            SetCursor(LoadCursorW(
+                null_mut(),
+                if over_bar { IDC_ARROW } else { IDC_IBEAM },
+            ));
+            return Some(1);
+        }
         WM_LBUTTONDOWN => {
             SetFocus(hwnd);
             let (x, y) = lparam_point(lp);
@@ -667,7 +872,7 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             SetTimer(hwnd, DRAG_TIMER, 50, None);
             0
         }
-        WM_LBUTTONDBLCLK => {
+        WM_LBUTTONDBLCLK if bar_hit(v, lp).is_none() => {
             let (x, y) = lparam_point(lp);
             let at = hit(v, x, y);
             v.ed.select_word_at(at);
@@ -692,17 +897,18 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let mut pt: POINT = zeroed();
             GetCursorPos(&mut pt);
             ScreenToClient(hwnd, &mut pt);
+            let tr = text_rect(v);
             if pt.y < 0 {
                 v.ed.scroll_rows(-1);
-            } else if pt.y >= v.height {
+            } else if pt.y >= tr.h {
                 v.ed.scroll_rows(1);
             }
             if pt.x < 0 {
                 v.ed.scroll_cols(-4);
-            } else if pt.x >= v.width {
+            } else if pt.x >= tr.w {
                 v.ed.scroll_cols(4);
             }
-            let at = hit(v, pt.x, pt.y.min(v.height - 1));
+            let at = hit(v, pt.x, pt.y.min(tr.h - 1));
             let anchor = v.ed.anchor();
             v.ed.set_selection(anchor, at);
             0
@@ -728,33 +934,6 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 SB_PAGEDOWN => v.ed.scroll_rows((rows - 1).max(1)),
                 SB_TOP => v.ed.scroll_to_line(0),
                 SB_BOTTOM => v.ed.scroll_to_line(usize::MAX),
-                SB_THUMBTRACK | SB_THUMBPOSITION => {
-                    let mut si: SCROLLINFO = zeroed();
-                    si.cbSize = size_of::<SCROLLINFO>() as u32;
-                    si.fMask = SIF_TRACKPOS;
-                    GetScrollInfo(hwnd, SB_VERT, &mut si);
-                    let s = v_scale(v.ed.buffer().line_count());
-                    v.ed.scroll_to_line(si.nTrackPos.max(0) as usize * s);
-                }
-                _ => {}
-            }
-            0
-        }
-        WM_HSCROLL => {
-            let cols = (v.width / v.cell_w).max(1) as i64;
-            match (wp & 0xFFFF) as i32 {
-                SB_LINELEFT => v.ed.scroll_cols(-1),
-                SB_LINERIGHT => v.ed.scroll_cols(1),
-                SB_PAGELEFT => v.ed.scroll_cols(-cols),
-                SB_PAGERIGHT => v.ed.scroll_cols(cols),
-                SB_LEFT => v.ed.set_left(0),
-                SB_THUMBTRACK | SB_THUMBPOSITION => {
-                    let mut si: SCROLLINFO = zeroed();
-                    si.cbSize = size_of::<SCROLLINFO>() as u32;
-                    si.fMask = SIF_TRACKPOS;
-                    GetScrollInfo(hwnd, SB_HORZ, &mut si);
-                    v.ed.set_left(si.nTrackPos.max(0) as usize);
-                }
                 _ => {}
             }
             0
@@ -766,6 +945,7 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let wrap = v.ed.wrap();
             v.ed = Editor::new(Buffer::from_text(&wide_arg(lp)), NATIVE_EOL);
             v.ed.set_wrap(wrap);
+            v.last = None;
             layout(v);
             1
         }
@@ -802,6 +982,10 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             v.ed.insert(&wide_arg(lp));
             0
         }
+        EM_GETFIRSTVISIBLELINE => {
+            v.quiet = true;
+            v.ed.top_line() as LRESULT
+        }
         EM_SCROLLCARET => {
             v.ed.ensure_visible();
             0
@@ -834,4 +1018,81 @@ unsafe fn handle(hwnd: HWND, v: &mut View, msg: u32, wp: WPARAM, lp: LPARAM) -> 
         _ => return None,
     };
     Some(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> Frame {
+        Frame {
+            size: (800, 600),
+            top: 10,
+            left: 0,
+            rows: 30,
+            wrap: false,
+            lines: 100,
+            version: 1,
+            edit_line: 12,
+            sel: 5..5,
+            caret_line: 12,
+            vbar: (100, 30, 10),
+            hbar: (80, 70, 0),
+        }
+    }
+
+    #[test]
+    fn typing_on_the_caret_line_repaints_that_line() {
+        let old = frame();
+        let new = Frame {
+            version: 2,
+            sel: 6..6,
+            ..frame()
+        };
+        assert_eq!(dirty_lines(&old, &new), Some(vec![12, 12]));
+    }
+
+    #[test]
+    fn caret_moving_between_lines_repaints_both() {
+        let new = Frame {
+            caret_line: 13,
+            sel: 9..9,
+            ..frame()
+        };
+        assert_eq!(dirty_lines(&frame(), &new), Some(vec![12, 13]));
+    }
+
+    #[test]
+    fn anything_else_repaints_everything() {
+        let base = frame();
+        for new in [
+            Frame { top: 11, ..frame() },
+            Frame { left: 3, ..frame() },
+            Frame {
+                size: (801, 600),
+                ..frame()
+            },
+            Frame {
+                lines: 101,
+                version: 2,
+                ..frame()
+            },
+            Frame {
+                wrap: true,
+                ..frame()
+            },
+            Frame {
+                sel: 5..9,
+                ..frame()
+            },
+            // An edit away from the caret (e.g. replace-all) is not local.
+            Frame {
+                version: 2,
+                edit_line: 40,
+                ..frame()
+            },
+        ] {
+            assert_eq!(dirty_lines(&base, &new), None, "{new:?}");
+        }
+    }
 }

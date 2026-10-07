@@ -1,6 +1,6 @@
 //! GDI renderer for [`DrawList`]s and [`Measure`] implementation for the UI layer.
 
-use foxing::ui::{Cmd, Color, DrawList, Font, Measure};
+use foxing::ui::{Cmd, Color, DrawList, Font, Measure, Rect};
 use std::mem::zeroed;
 use std::ptr::{null, null_mut};
 use windows_sys::w;
@@ -84,6 +84,9 @@ pub unsafe fn render(hdc: HDC, dl: &DrawList, g: &Gdi) {
     SetBkMode(hdc, TRANSPARENT as i32);
     let mut units: Vec<u16> = Vec::new();
     let mut dx: Vec<i32> = Vec::new();
+    // GDI state changes aren't free; only issue them when the value changes.
+    let mut cur_font: HFONT = null_mut();
+    let mut cur_color: Option<Color> = None;
     for cmd in &dl.cmds {
         match cmd {
             Cmd::Fill { rect, color } => {
@@ -120,8 +123,14 @@ pub unsafe fn render(hdc: HDC, dl: &DrawList, g: &Gdi) {
                     right: clip.right(),
                     bottom: clip.bottom(),
                 };
-                SelectObject(hdc, g.font(*font) as HGDIOBJ);
-                SetTextColor(hdc, colorref(*color));
+                if cur_font != g.font(*font) {
+                    cur_font = g.font(*font);
+                    SelectObject(hdc, cur_font as HGDIOBJ);
+                }
+                if cur_color != Some(*color) {
+                    cur_color = Some(*color);
+                    SetTextColor(hdc, colorref(*color));
+                }
                 ExtTextOutW(
                     hdc,
                     *x,
@@ -152,8 +161,14 @@ pub unsafe fn render(hdc: HDC, dl: &DrawList, g: &Gdi) {
                         dx.push(0);
                     }
                 }
-                SelectObject(hdc, g.font(Font::Text) as HGDIOBJ);
-                SetTextColor(hdc, colorref(*color));
+                if cur_font != g.font(Font::Text) {
+                    cur_font = g.font(Font::Text);
+                    SelectObject(hdc, cur_font as HGDIOBJ);
+                }
+                if cur_color != Some(*color) {
+                    cur_color = Some(*color);
+                    SetTextColor(hdc, colorref(*color));
+                }
                 match bg {
                     Some((bg, h)) => {
                         let rc = RECT {
@@ -185,22 +200,64 @@ pub unsafe fn render(hdc: HDC, dl: &DrawList, g: &Gdi) {
     }
 }
 
-/// Paints `hwnd` through an off-screen bitmap to avoid flicker.
-pub unsafe fn paint_buffered(hwnd: HWND, f: impl FnOnce(HDC, i32, i32)) {
-    let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
-    let mut rc: RECT = zeroed();
-    windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
-    let (w, h) = (rc.right.max(1), rc.bottom.max(1));
-    let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, w, h);
-    let old = SelectObject(mem, bmp as HGDIOBJ);
-    f(mem, w, h);
-    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, old);
-    DeleteObject(bmp as HGDIOBJ);
-    DeleteDC(mem);
-    EndPaint(hwnd, &ps);
+/// Off-screen bitmap reused across paints (recreated only when the size changes).
+/// Allocating a window-sized bitmap per paint costs several ms on large windows.
+pub struct BackBuffer {
+    bmp: HBITMAP,
+    size: (i32, i32),
+}
+
+impl BackBuffer {
+    pub const fn new() -> Self {
+        BackBuffer {
+            bmp: null_mut(),
+            size: (0, 0),
+        }
+    }
+
+    /// Paints `hwnd` through the buffer to avoid flicker. `f` gets the region to draw:
+    /// the invalid rect, or everything when the buffer was just (re)created. Only that
+    /// region is copied to the screen; the rest of the buffer keeps the last frame.
+    pub unsafe fn paint(&mut self, hwnd: HWND, f: impl FnOnce(HDC, i32, i32, Rect)) {
+        let mut ps: PAINTSTRUCT = zeroed();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let r = ps.rcPaint;
+        if r.right <= r.left || r.bottom <= r.top {
+            // Nothing invalid (e.g. a WM_PAINT sent by UpdateWindow after we already
+            // painted): skip a full redraw.
+            EndPaint(hwnd, &ps);
+            return;
+        }
+        let mut rc: RECT = zeroed();
+        windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
+        let (w, h) = (rc.right.max(1), rc.bottom.max(1));
+        let mut clip = Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
+        if self.bmp.is_null() || self.size != (w, h) {
+            if !self.bmp.is_null() {
+                DeleteObject(self.bmp as HGDIOBJ);
+            }
+            self.bmp = CreateCompatibleBitmap(hdc, w, h);
+            self.size = (w, h);
+            clip = Rect::new(0, 0, w, h);
+        }
+        let mem = CreateCompatibleDC(hdc);
+        let old = SelectObject(mem, self.bmp as HGDIOBJ);
+        f(mem, w, h, clip);
+        BitBlt(
+            hdc, clip.x, clip.y, clip.w, clip.h, mem, clip.x, clip.y, SRCCOPY,
+        );
+        SelectObject(mem, old);
+        DeleteDC(mem);
+        EndPaint(hwnd, &ps);
+    }
+}
+
+impl Drop for BackBuffer {
+    fn drop(&mut self) {
+        if !self.bmp.is_null() {
+            unsafe { DeleteObject(self.bmp as HGDIOBJ) };
+        }
+    }
 }
 
 /// Proportional UI font (Segoe UI 9 pt) at `dpi`.

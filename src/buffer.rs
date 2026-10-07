@@ -286,6 +286,27 @@ impl Buffer {
         self.lines.prefix(c) as usize + count_nl(&self.chunks[c].text[..off])
     }
 
+    /// Offset of the first `byte` at or after `from`.
+    pub fn find_byte(&self, from: usize, byte: u8) -> Option<usize> {
+        if from >= self.len() {
+            return None;
+        }
+        let (mut c, mut off) = self.locate(from);
+        let mut base = from - off;
+        loop {
+            let t = &self.chunks[c].text;
+            if let Some(p) = memchr::memchr(byte, &t[off..]) {
+                return Some(base + off + p);
+            }
+            base += t.len();
+            c += 1;
+            off = 0;
+            if c == self.chunks.len() {
+                return None;
+            }
+        }
+    }
+
     /// Content of `line`, excluding its `\n` and a `\r` before it.
     pub fn line_range(&self, line: usize) -> Range<usize> {
         let start = self.line_start(line);
@@ -767,6 +788,15 @@ mod tests {
         check_against(&b, "");
         assert_eq!(b.line_range(0), 0..0);
         assert_eq!(b.detect_eol(), None);
+    }
+
+    #[test]
+    fn find_byte_crosses_chunks() {
+        let b = Buffer::with_chunk_size("ab\ncd\nef", 2);
+        assert_eq!(b.find_byte(0, b'\n'), Some(2));
+        assert_eq!(b.find_byte(3, b'\n'), Some(5));
+        assert_eq!(b.find_byte(6, b'\n'), None);
+        assert_eq!(b.find_byte(99, b'\n'), None);
     }
 
     #[test]
