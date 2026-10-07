@@ -4,6 +4,8 @@ A tiny plain-text editor for Windows, written in Rust. Just text files.
 
 ![Foxing editing a short text file](docs/screenshot.png)
 
+![Foxing with a folder of text files open](docs/folder.png)
+
 Foxing is the brown spotting that shows up on old paper. This is the
 paper.
 
@@ -27,6 +29,8 @@ paper.
 - Light and dark themes, following the Windows setting by default (View menu)
 - Open from the command line (`foxing todo.txt`) or by dragging a file
   onto the window
+- Open a folder (File → Open Folder, or `foxing <folder>`) to get a sidebar of
+  its `.txt` and `.md` files; the last folder comes back next time
 - Unsaved-changes prompt on close
 
 ## Install
