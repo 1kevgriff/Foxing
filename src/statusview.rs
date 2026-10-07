@@ -2,6 +2,8 @@
 //! by tabs, for automation and tests.
 
 use crate::gdi::{self, BackBuffer, Gdi};
+use crate::uia;
+use foxing::ui::a11y::{Action, Node};
 use foxing::ui::status::StatusBar;
 use foxing::ui::{DrawList, Rect, Theme};
 use std::cell::RefCell;
@@ -109,6 +111,23 @@ pub unsafe fn set_dpi(hwnd: HWND, dpi: u32) {
     InvalidateRect(hwnd, null(), 0);
 }
 
+static A11Y: uia::Source = uia::Source {
+    tree: a11y_tree,
+    act: a11y_act,
+    class: "FoxingStatus",
+};
+
+unsafe fn a11y_tree(hwnd: HWND) -> Node {
+    let mut rc: RECT = zeroed();
+    GetClientRect(hwnd, &mut rc);
+    let bounds = Rect::new(0, 0, rc.right, rc.bottom);
+    state(hwnd)
+        .and_then(|s| s.try_borrow().ok().map(|st| st.bar.a11y(bounds, &st.gdi)))
+        .unwrap_or_default()
+}
+
+unsafe fn a11y_act(_: HWND, _: Action) {}
+
 fn joined(bar: &StatusBar) -> Vec<u16> {
     (0..bar.parts())
         .map(|i| bar.text(i))
@@ -163,6 +182,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             0
         }
+        WM_GETOBJECT => uia::get_object(hwnd, wp, lp, &A11Y)
+            .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
         WM_GETTEXTLENGTH => state(hwnd).map_or(0, |s| joined(&s.borrow().bar).len() as LRESULT),
         WM_GETTEXT => {
             let Some(s) = state(hwnd) else { return 0 };

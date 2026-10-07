@@ -599,6 +599,85 @@ fn folder_is_remembered_and_can_be_closed() {
         .contains("last_folder"));
 }
 
+/// Runs a Windows PowerShell snippet with the .NET UI Automation client loaded, as a
+/// screen reader would see Foxing. `H` in the script is replaced by `hwnd`.
+fn uia(hwnd: HWND, script: &str) -> String {
+    let script = format!(
+        "Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes; \
+         $A = [System.Windows.Automation.AutomationElement]; \
+         $T = [System.Windows.Automation.TreeScope]; \
+         $C = [System.Windows.Automation.Condition]::TrueCondition; \
+         $e = $A::FromHandle([IntPtr]{}); {}",
+        hwnd as isize, script
+    );
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .expect("run powershell");
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    assert!(
+        out.status.success(),
+        "uia script failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    text
+}
+
+const NAMES: &str = "($e.FindAll($T::Children, $C) | % { $_.Current.Name + ':' + $_.Current.ControlType.ProgrammaticName }) -join ';'";
+
+#[test]
+fn uia_menu_bar_lists_menus_and_runs_items() {
+    let app = App::launch(None);
+    assert_eq!(
+        uia(app.menubar(), NAMES),
+        "File:ControlType.MenuItem;Edit:ControlType.MenuItem;Format:ControlType.MenuItem;View:ControlType.MenuItem"
+    );
+    // Expand Format, then toggle Word Wrap, as a screen reader user would.
+    uia(
+        app.menubar(),
+        "$f = $e.FindAll($T::Children, $C)[2]; \
+         $f.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand(); \
+         $c = New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Word Wrap'); \
+         $w = $f.FindFirst($T::Children, $c); \
+         $w.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()",
+    );
+    wait_for(5000, || app.menu_checked(ID_WRAP).then_some(())).expect("Word Wrap toggled via UIA");
+}
+
+#[test]
+fn uia_folder_list_selects_files() {
+    let d = sample_folder("folder-uia");
+    let app = App::launch(Some(&d));
+    assert_eq!(
+        uia(app.folder_view(), NAMES),
+        "a.txt:ControlType.ListItem;b.md:ControlType.ListItem"
+    );
+    uia(
+        app.folder_view(),
+        "$e.FindAll($T::Children, $C)[1].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()",
+    );
+    app.wait_title("b.md - Foxing");
+}
+
+#[test]
+fn uia_status_bar_and_document() {
+    let f = tmp("uia-doc.txt");
+    std::fs::write(&f, "hello\nworld").unwrap();
+    let app = App::launch(Some(&f));
+    let status = uia(app.status(), NAMES);
+    assert!(status.contains("Ln 1, Col 1:ControlType.Text"), "{status}");
+    assert!(status.contains("Unix (LF):ControlType.Text"), "{status}");
+    let doc = uia(
+        app.edit(),
+        "$e.Current.ControlType.ProgrammaticName + '|' + $e.Current.Name + '|' + \
+         $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value",
+    );
+    assert_eq!(
+        doc.replace("\r\n", "\n"),
+        "ControlType.Document|Text editor|hello\nworld"
+    );
+}
+
 #[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);

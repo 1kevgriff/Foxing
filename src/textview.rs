@@ -3,9 +3,11 @@
 //! `EM_GETSEL`, `EM_SETSEL`, `EM_REPLACESEL`, ...) and sends `EN_CHANGE` to its parent.
 
 use crate::gdi::{self, BackBuffer, Gdi};
+use crate::uia;
 use foxing::buffer::Buffer;
 use foxing::document::NATIVE_EOL;
 use foxing::editor::{Editor, Motion};
+use foxing::ui::a11y::{Action, Node, Role};
 use foxing::ui::scroll::{ScrollAction, ScrollBar};
 use foxing::ui::{Cmd, DrawList, Rect, Theme};
 use std::cell::{Cell, RefCell};
@@ -283,6 +285,31 @@ pub unsafe fn set_theme(hwnd: HWND, theme: Theme) {
     }
     finish(hwnd, sh);
 }
+
+/// Longest text exposed through the UIA Value pattern (the Text pattern, #25 part 2,
+/// will serve documents of any size).
+const A11Y_VALUE_CHARS: usize = 100_000;
+
+static A11Y: uia::Source = uia::Source {
+    tree: a11y_tree,
+    act: a11y_act,
+    class: "FoxingText",
+};
+
+unsafe fn a11y_tree(hwnd: HWND) -> Node {
+    let Some(sh) = shared(hwnd) else {
+        return Node::default();
+    };
+    let (w, h) = sh.size.get();
+    let mut n = Node::new(Role::Document, "Text editor", Rect::new(0, 0, w, h));
+    n.focused = sh.focused.get();
+    if let Ok(v) = sh.view.try_borrow() {
+        n.value = Some(v.ed.buffer().chars_from(0).take(A11Y_VALUE_CHARS).collect());
+    }
+    n
+}
+
+unsafe fn a11y_act(_: HWND, _: Action) {}
 
 /// Automation: returns the text background color (0xRRGGBB).
 pub const VM_GETBG: u32 = WM_APP + 10;
@@ -666,6 +693,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 
+    if msg == WM_GETOBJECT {
+        if let Some(r) = uia::get_object(hwnd, wp, lp, &A11Y) {
+            return r;
+        }
+    }
     // Messages that can arrive re-entrantly only touch the plain cells.
     match msg {
         WM_ERASEBKGND => return 1,

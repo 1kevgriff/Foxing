@@ -1,5 +1,6 @@
 //! Status bar: a flexible first part, then fixed-width parts aligned to the right.
 
+use super::a11y::{Node, Role};
 use super::{DrawList, Font, Measure, Rect, Theme};
 
 /// Horizontal text padding inside a part (96-DPI px).
@@ -54,6 +55,17 @@ impl StatusBar {
         }
         rects[0] = Rect::new(bounds.x, bounds.y, (right - bounds.x).max(0), bounds.h);
         rects
+    }
+
+    /// The bar as an accessibility tree: one text node per non-empty part.
+    pub fn a11y(&self, bounds: Rect, m: &dyn Measure) -> Node {
+        let mut root = Node::new(Role::StatusBar, "Status bar", bounds);
+        for (i, r) in self.part_rects(bounds, m).into_iter().enumerate() {
+            if !self.texts[i].is_empty() {
+                root.children.push(Node::new(Role::Text, &self.texts[i], r));
+            }
+        }
+        root
     }
 
     pub fn paint(&self, bounds: Rect, theme: &Theme, m: &dyn Measure, dl: &mut DrawList) {
@@ -112,6 +124,16 @@ mod tests {
         // Too narrow: the flexible part collapses rather than going negative.
         let r = bar.part_rects(Rect::new(0, 0, 100, 20), &FakeMeasure(96));
         assert_eq!(r[0].w, 0);
+    }
+
+    #[test]
+    fn a11y_has_one_text_per_filled_part() {
+        let mut bar = StatusBar::new(&[100, 50]);
+        bar.set_text(2, "UTF-8");
+        let t = bar.a11y(Rect::new(0, 0, 400, 20), &FakeMeasure(96));
+        assert_eq!(t.children.len(), 1);
+        assert_eq!(t.children[0].name, "UTF-8");
+        assert_eq!(t.children[0].rect.x, 350);
     }
 
     #[test]
