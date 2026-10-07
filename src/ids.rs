@@ -1,6 +1,10 @@
 //! Control and command IDs, shared with the E2E tests.
 
 pub const IDC_EDIT: u16 = 100;
+pub const IDC_STATUS: u16 = 101;
+
+/// Text view notification (WM_COMMAND high word): caret or selection moved.
+pub const VN_CARET: u16 = 0x8001;
 
 pub const ID_NEW: u16 = 1001;
 pub const ID_OPEN: u16 = 1002;
@@ -17,3 +21,5 @@ pub const ID_FIND: u16 = 1106;
 pub const ID_FIND_NEXT: u16 = 1107;
 
 pub const ID_WRAP: u16 = 1201;
+
+pub const ID_STATUS_BAR: u16 = 1301;

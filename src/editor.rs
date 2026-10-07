@@ -158,6 +158,23 @@ impl Editor {
         self.head
     }
 
+    /// 1-based line and column of the caret; the column counts chars (a tab is one).
+    pub fn caret_line_col(&self) -> (usize, usize) {
+        let line = self.buf.line_of(self.head);
+        let start = self.buf.line_start(line);
+        let mut p = start;
+        let col = self
+            .buf
+            .chars_from(start)
+            .take_while(|c| {
+                let before = p < self.head;
+                p += c.len_utf8();
+                before
+            })
+            .count();
+        (line + 1, col + 1)
+    }
+
     pub fn selected_text(&self) -> String {
         self.buf.slice(self.selection())
     }
@@ -1005,6 +1022,16 @@ mod tests {
         assert_eq!(e.selection(), 8..11);
         assert!(e.find("ONE", false, false));
         assert_eq!(e.selection(), 0..3);
+    }
+
+    #[test]
+    fn caret_line_col_counts_chars() {
+        let mut e = ed("ab\n\tcé✓d");
+        assert_eq!(e.caret_line_col(), (1, 1));
+        e.set_selection(2, 2);
+        assert_eq!(e.caret_line_col(), (1, 3));
+        e.move_caret(Motion::DocEnd, false);
+        assert_eq!(e.caret_line_col(), (2, 6));
     }
 
     #[test]

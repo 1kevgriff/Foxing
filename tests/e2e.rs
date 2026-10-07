@@ -14,7 +14,14 @@ use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::System::Threading::{GetProcessTimes, WaitForInputIdle};
+use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+use windows_sys::Win32::System::Memory::{
+    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE,
+};
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, WaitForInputIdle, PROCESS_QUERY_INFORMATION,
+    PROCESS_VM_OPERATION, PROCESS_VM_READ,
+};
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -163,6 +170,33 @@ impl App {
             .unwrap_or_else(|| panic!("dialog {title:?} not found"))
     }
 
+    fn status(&self) -> HWND {
+        unsafe { GetDlgItem(self.hwnd, IDC_STATUS as i32) }
+    }
+
+    /// Text of a status bar part. SB_GETTEXTW isn't marshaled across processes, so the
+    /// buffer is allocated inside Foxing's address space and read back.
+    fn status_text(&self, part: usize) -> String {
+        const CAP: usize = 256;
+        unsafe {
+            let proc = OpenProcess(
+                PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
+                0,
+                self.pid(),
+            );
+            assert!(!proc.is_null(), "OpenProcess");
+            let remote = VirtualAllocEx(proc, null_mut(), CAP * 2, MEM_COMMIT, PAGE_READWRITE);
+            assert!(!remote.is_null(), "VirtualAllocEx");
+            let r = SendMessageW(self.status(), SB_GETTEXTW, part, remote as LPARAM) as usize;
+            let len = (r & 0xFFFF).min(CAP - 1);
+            let mut buf = vec![0u16; len];
+            ReadProcessMemory(proc, remote, buf.as_mut_ptr().cast(), len * 2, null_mut());
+            VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+            CloseHandle(proc);
+            String::from_utf16_lossy(&buf)
+        }
+    }
+
     fn alive(&mut self) -> bool {
         self.child.try_wait().unwrap().is_none()
     }
@@ -261,6 +295,44 @@ fn crlf_file_keeps_crlf() {
     unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) };
     app.cmd(ID_SAVE);
     assert_eq!(std::fs::read(&f).unwrap(), b"\r\na\r\nb");
+}
+
+#[test]
+fn status_bar_shows_position_lines_and_eol() {
+    let f = tmp("status-lf.txt");
+    std::fs::write(&f, "ab\ncd").unwrap();
+    let app = App::launch(Some(&f));
+    assert_eq!(app.status_text(1), "Ln 1, Col 1");
+    assert_eq!(app.status_text(2), "2 lines");
+    assert_eq!(app.status_text(3), "Unix (LF)");
+    assert_eq!(app.status_text(4), "UTF-8");
+    for c in "xy".chars() {
+        unsafe { SendMessageW(app.edit(), WM_CHAR, c as WPARAM, 0) };
+    }
+    assert_eq!(app.status_text(1), "Ln 1, Col 3");
+    unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) };
+    assert_eq!(app.status_text(1), "Ln 2, Col 1");
+    assert_eq!(app.status_text(2), "3 lines");
+
+    let f = tmp("status-crlf.txt");
+    std::fs::write(&f, "a\r\nb").unwrap();
+    let app = App::launch(Some(&f));
+    assert_eq!(app.status_text(3), "Windows (CRLF)");
+}
+
+#[test]
+fn status_bar_toggle() {
+    let app = App::launch(None);
+    let checked =
+        || unsafe { GetMenuState(GetMenu(app.hwnd), ID_STATUS_BAR as u32, MF_BYCOMMAND) } & MF_CHECKED;
+    assert_ne!(unsafe { IsWindowVisible(app.status()) }, 0);
+    assert_ne!(checked(), 0);
+    app.cmd(ID_STATUS_BAR);
+    assert_eq!(unsafe { IsWindowVisible(app.status()) }, 0);
+    assert_eq!(checked(), 0);
+    app.cmd(ID_STATUS_BAR);
+    assert_ne!(unsafe { IsWindowVisible(app.status()) }, 0);
+    assert_eq!(app.status_text(1), "Ln 1, Col 1");
 }
 
 #[test]
