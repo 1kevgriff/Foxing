@@ -2,6 +2,8 @@
 //! posts `WM_COMMAND(id, LN_ACTIVATE)` to the parent, which asks for [`selected`].
 
 use crate::gdi::{self, BackBuffer, Gdi};
+use crate::uia;
+use foxing::ui::a11y::{Action, Node};
 use foxing::ui::list::{List, ListMsg};
 use foxing::ui::{DrawList, Measure, Rect, Theme};
 use std::cell::RefCell;
@@ -136,6 +138,37 @@ pub unsafe fn set_dpi(hwnd: HWND, dpi: u32) {
     InvalidateRect(hwnd, null(), 0);
 }
 
+static A11Y: uia::Source = uia::Source {
+    tree: a11y_tree,
+    act: a11y_act,
+    class: "FoxingFolder",
+};
+
+unsafe fn a11y_tree(hwnd: HWND) -> Node {
+    state(hwnd)
+        .and_then(|s| {
+            s.try_borrow()
+                .ok()
+                .map(|st| st.list.a11y(client(hwnd), &st.gdi))
+        })
+        .unwrap_or_default()
+}
+
+unsafe fn a11y_act(hwnd: HWND, a: Action) {
+    if let Action::ActivateRow(i) = a {
+        activate(hwnd, i);
+    }
+}
+
+/// Selects row `i` and tells the parent, as a click would.
+unsafe fn activate(hwnd: HWND, i: usize) {
+    if let Some(s) = state(hwnd) {
+        s.borrow_mut().list.set_selected(Some(i));
+    }
+    InvalidateRect(hwnd, null(), 0);
+    notify_activate(hwnd);
+}
+
 unsafe fn notify_activate(hwnd: HWND) {
     let id = GetDlgCtrlID(hwnd) as usize;
     // Posted: the parent may show a save prompt.
@@ -170,6 +203,7 @@ unsafe fn run(hwnd: HWND, f: impl FnOnce(&mut List, Rect, &Gdi) -> ListMsg) {
         ListMsg::Activate(_) => {
             InvalidateRect(hwnd, null(), 0);
             notify_activate(hwnd);
+            uia::focus_changed(hwnd, &A11Y);
         }
     }
 }
@@ -270,13 +304,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         FL_GETCOUNT => state(hwnd).map_or(0, |s| s.borrow().list.items().len() as LRESULT),
         FL_GETSEL => selected(hwnd).map_or(-1, |i| i as LRESULT),
         FL_ACTIVATE => {
-            if let Some(s) = state(hwnd) {
-                s.borrow_mut().list.set_selected(Some(wp));
-            }
-            InvalidateRect(hwnd, null(), 0);
-            notify_activate(hwnd);
+            activate(hwnd, wp);
             0
         }
+        WM_GETOBJECT => uia::get_object(hwnd, wp, lp, &A11Y)
+            .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }

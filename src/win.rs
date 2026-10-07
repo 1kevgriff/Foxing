@@ -667,7 +667,7 @@ unsafe fn find_next() {
 fn menus() -> Vec<Menu> {
     let it = MenuItem::new;
     let sep = MenuItem::separator;
-    let mut status_bar = it("&Status Bar", "", ID_STATUS_BAR);
+    let mut status_bar = it("&Status Bar", "", ID_STATUS_BAR).checkable();
     status_bar.checked = true;
     vec![
         Menu::new(
@@ -699,15 +699,15 @@ fn menus() -> Vec<Menu> {
                 it("Select &All", "Ctrl+A", ID_SELECT_ALL),
             ],
         ),
-        Menu::new("F&ormat", vec![it("&Word Wrap", "", ID_WRAP)]),
+        Menu::new("F&ormat", vec![it("&Word Wrap", "", ID_WRAP).checkable()]),
         Menu::new(
             "&View",
             vec![
                 status_bar,
                 sep(),
-                it("S&ystem Theme", "", ID_THEME_SYSTEM),
-                it("&Light Theme", "", ID_THEME_LIGHT),
-                it("&Dark Theme", "", ID_THEME_DARK),
+                it("S&ystem Theme", "", ID_THEME_SYSTEM).checkable(),
+                it("&Light Theme", "", ID_THEME_LIGHT).checkable(),
+                it("&Dark Theme", "", ID_THEME_DARK).checkable(),
             ],
         ),
     ]

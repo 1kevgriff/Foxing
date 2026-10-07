@@ -1,5 +1,6 @@
 //! Scrollable single-column list with a header (the folder sidebar).
 
+use super::a11y::{Action, Node, Role};
 use super::{DrawList, Font, Measure, Rect, Theme};
 
 const PAD_X: i32 = 12;
@@ -129,6 +130,21 @@ impl List {
         }
     }
 
+    /// The list as an accessibility tree; rows outside the view get virtual positions.
+    pub fn a11y(&self, b: Rect, m: &dyn Measure) -> Node {
+        let mut root = Node::new(Role::List, &self.header, b);
+        let (hh, rh) = (self.header_h(m), self.row_h(m));
+        for (i, name) in self.items.iter().enumerate() {
+            let y = b.y + hh + (i as i32 - self.top as i32) * rh;
+            let mut n = Node::new(Role::ListItem, name, Rect::new(b.x, y, b.w, rh));
+            n.selected = Some(self.selected == Some(i));
+            n.focused = self.selected == Some(i);
+            n.action = Some(Action::ActivateRow(i));
+            root.children.push(n);
+        }
+        root
+    }
+
     pub fn paint(&self, b: Rect, theme: &Theme, m: &dyn Measure, dl: &mut DrawList) {
         dl.fill(b, theme.chrome_bg);
         // Right edge separates the list from the text.
@@ -238,6 +254,18 @@ mod tests {
         l.set_items(vec!["only.txt".into()]);
         assert_eq!(l.selected(), None);
         assert!(!l.set_selected(Some(9)));
+    }
+
+    #[test]
+    fn a11y_lists_rows_with_selection() {
+        let mut l = list(3);
+        l.set_selected(Some(1));
+        let t = l.a11y(B, &M);
+        assert_eq!(t.name, "My folder");
+        assert_eq!(t.children.len(), 3);
+        assert_eq!(t.children[1].selected, Some(true));
+        assert_eq!(t.children[1].action, Some(Action::ActivateRow(1)));
+        assert_eq!(t.children[0].rect.y, 32);
     }
 
     #[test]

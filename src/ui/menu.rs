@@ -2,6 +2,7 @@
 //! arrows, Enter, Esc) both drive a small state machine; hosts forward input and act
 //! on the returned [`MenuMsg`].
 
+use super::a11y::{Action, Node, Role};
 use super::{Cmd, DrawList, Font, Measure, Rect, Theme};
 
 // Layout constants (96-DPI px).
@@ -24,6 +25,8 @@ pub struct MenuItem {
     pub accel: String,
     pub id: u16,
     pub checked: bool,
+    /// Has an on/off state (reported to screen readers even when off).
+    pub checkable: bool,
 }
 
 impl MenuItem {
@@ -33,7 +36,14 @@ impl MenuItem {
             accel: accel.to_owned(),
             id,
             checked: false,
+            checkable: false,
         }
+    }
+
+    /// Marks the item as an on/off toggle.
+    pub fn checkable(mut self) -> Self {
+        self.checkable = true;
+        self
     }
 
     pub fn separator() -> Self {
@@ -310,6 +320,18 @@ impl MenuBar {
         MenuMsg::Repaint
     }
 
+    /// Opens menu `i`, or closes it if it's the open one (UIA expand/collapse).
+    pub fn toggle_menu(&mut self, i: usize) -> MenuMsg {
+        if i >= self.menus.len() {
+            return MenuMsg::Nothing;
+        }
+        if self.open == Some(i) {
+            return self.close();
+        }
+        self.open_at(i, true);
+        MenuMsg::Repaint
+    }
+
     /// Alt+letter: opens the menu with that mnemonic.
     pub fn mnemonic(&mut self, c: char) -> MenuMsg {
         let c = c.to_ascii_lowercase();
@@ -454,6 +476,40 @@ impl MenuBar {
             (Some(menu), Some(item)) => self.choose(menu, item),
             _ => MenuMsg::Nothing,
         }
+    }
+
+    // ---- accessibility ----
+
+    /// The bar as an accessibility tree (bar-window client coordinates).
+    pub fn a11y(&self, bounds: Rect, m: &dyn Measure) -> Node {
+        let mut root = Node::new(Role::MenuBar, "Application", bounds);
+        let dropdown = self.dropdown(bounds, m);
+        for (i, (menu, r)) in self
+            .menus
+            .iter()
+            .zip(self.title_rects(bounds, m))
+            .enumerate()
+        {
+            let mut title = Node::new(Role::MenuItem, &parse_label(&menu.title).0, r);
+            title.expanded = Some(self.open == Some(i));
+            title.focused = self.active && self.hot == Some(i) && self.item.is_none();
+            title.action = Some(Action::ToggleMenu(i));
+            if let (Some((_, items)), true) = (&dropdown, self.open == Some(i)) {
+                for (j, (it, ir)) in menu.items.iter().zip(items).enumerate() {
+                    if it.is_separator() {
+                        title.children.push(Node::new(Role::Separator, "", *ir));
+                        continue;
+                    }
+                    let mut n = Node::new(Role::MenuItem, &parse_label(&it.label).0, *ir);
+                    n.checked = it.checkable.then_some(it.checked);
+                    n.focused = self.item == Some(j);
+                    n.action = Some(Action::Command(it.id));
+                    title.children.push(n);
+                }
+            }
+            root.children.push(title);
+        }
+        root
     }
 
     // ---- painting ----
@@ -692,6 +748,41 @@ mod tests {
         b.mnemonic('f');
         b.key(MenuKey::Char('e'));
         assert_eq!(b.open_menu(), Some(1));
+    }
+
+    #[test]
+    fn toggle_menu_opens_and_closes() {
+        let mut b = bar();
+        assert_eq!(b.toggle_menu(1), MenuMsg::Repaint);
+        assert_eq!(b.open_menu(), Some(1));
+        assert_eq!(b.toggle_menu(1), MenuMsg::Closed);
+        assert_eq!(b.toggle_menu(9), MenuMsg::Nothing);
+    }
+
+    #[test]
+    fn a11y_tree_reflects_state() {
+        let mut b = bar();
+        b.menus[2].items[0] = MenuItem::new("&Status Bar", "", 20).checkable();
+        let t = b.a11y(bounds(), &M);
+        assert_eq!(t.children.len(), 3);
+        assert_eq!(t.children[0].name, "File");
+        assert_eq!(t.children[0].expanded, Some(false));
+        assert!(
+            t.children[0].children.is_empty(),
+            "closed menus have no items"
+        );
+        b.mnemonic('v');
+        let t = b.a11y(bounds(), &M);
+        let view = &t.children[2];
+        assert_eq!(view.expanded, Some(true));
+        assert_eq!(view.children[0].name, "Status Bar");
+        assert_eq!(view.children[0].checked, Some(false));
+        assert_eq!(view.children[0].action, Some(Action::Command(20)));
+        assert_eq!(t.focus_path(), Some(vec![2, 0]));
+        b.mnemonic('f');
+        let file = &b.a11y(bounds(), &M).children[0];
+        assert_eq!(file.children[2].role, Some(Role::Separator));
+        assert_eq!(file.children[0].checked, None, "not checkable");
     }
 
     #[test]

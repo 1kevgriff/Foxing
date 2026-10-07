@@ -15,6 +15,8 @@ mod statusview;
 #[cfg(windows)]
 mod textview;
 #[cfg(windows)]
+mod uia;
+#[cfg(windows)]
 mod win;
 
 #[cfg(windows)]

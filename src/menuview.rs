@@ -4,6 +4,8 @@
 //! over the popup) arrives here in bar coordinates.
 
 use crate::gdi::{self, BackBuffer, Gdi};
+use crate::uia;
+use foxing::ui::a11y::{Action, Node};
 use foxing::ui::menu::{Menu, MenuBar, MenuKey, MenuMsg};
 use foxing::ui::{DrawList, Rect, Theme};
 use std::cell::RefCell;
@@ -165,6 +167,37 @@ pub unsafe fn close(hwnd: HWND) {
     run(hwnd, |b, _, _| b.close());
 }
 
+static A11Y: uia::Source = uia::Source {
+    tree: a11y_tree,
+    act: a11y_act,
+    class: "FoxingMenuBar",
+};
+
+unsafe fn a11y_tree(hwnd: HWND) -> Node {
+    state(hwnd)
+        .and_then(|s| {
+            s.try_borrow()
+                .ok()
+                .map(|st| st.bar.a11y(client(hwnd), &st.gdi))
+        })
+        .unwrap_or_default()
+}
+
+unsafe fn a11y_act(hwnd: HWND, a: Action) {
+    match a {
+        Action::ToggleMenu(i) => {
+            run(hwnd, |b, _, _| b.toggle_menu(i));
+        }
+        Action::Command(id) => {
+            run(hwnd, |b, _, _| {
+                b.close();
+                MenuMsg::Command(id)
+            });
+        }
+        Action::ActivateRow(_) => {}
+    }
+}
+
 /// Applies an input to the bar, then syncs the window state to the result.
 unsafe fn run(hwnd: HWND, f: impl FnOnce(&mut MenuBar, Rect, &Gdi) -> MenuMsg) -> MenuMsg {
     let Some(s) = state(hwnd) else {
@@ -192,6 +225,7 @@ unsafe fn run(hwnd: HWND, f: impl FnOnce(&mut MenuBar, Rect, &Gdi) -> MenuMsg) -
         // Posted, not sent: the command may show dialogs or rebuild state.
         PostMessageW(GetParent(hwnd), WM_COMMAND, id as WPARAM, 0);
     }
+    uia::focus_changed(hwnd, &A11Y);
     msg
 }
 
@@ -339,6 +373,8 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             }
             0
         }
+        WM_GETOBJECT => uia::get_object(hwnd, wp, lp, &A11Y)
+            .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wp, lp)),
         MB_GETCHECK => state(hwnd).map_or(0, |s| s.borrow().bar.is_checked(wp as u16) as LRESULT),
         MB_GETOPEN => state(hwnd).map_or(-1, |s| {
             s.borrow().bar.open_menu().map_or(-1, |i| i as LRESULT)
