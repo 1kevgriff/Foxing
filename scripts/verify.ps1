@@ -21,7 +21,8 @@ function Step($name, [scriptblock]$body) {
 }
 
 function Run([string]$exe, [string[]]$argv) {
-    & $exe @argv
+    # Stream output to the console (not into the step result) so failures are visible.
+    & $exe @argv | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$exe $argv exited $LASTEXITCODE" }
 }
 
