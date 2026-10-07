@@ -682,6 +682,64 @@ fn uia_status_bar_and_document() {
 }
 
 #[test]
+fn uia_text_pattern_reads_and_navigates() {
+    let f = tmp("uia-text.txt");
+    std::fs::write(&f, "hello world\r\nsecond line").unwrap();
+    let app = App::launch(Some(&f));
+    let out = uia(
+        app.edit(),
+        "$U = [System.Windows.Automation.Text.TextUnit]; \
+         $EP = [System.Windows.Automation.Text.TextPatternRangeEndpoint]; \
+         $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); \
+         $doc = $tp.DocumentRange; \
+         $r = $doc.Clone(); $r.MoveEndpointByRange($EP::End, $r, $EP::Start); \
+         $r.ExpandToEnclosingUnit($U::Word); $w1 = $r.GetText(-1); \
+         [void]$r.Move($U::Word, 1); $w2 = $r.GetText(-1); \
+         $l = $doc.Clone(); $l.MoveEndpointByRange($EP::End, $l, $EP::Start); \
+         [void]$l.Move($U::Line, 1); $l.ExpandToEnclosingUnit($U::Line); $line2 = $l.GetText(-1); \
+         $found = $doc.FindText('LINE', $false, $true); $found.Select(); \
+         $rects = $found.GetBoundingRectangles().Count; \
+         ($doc.GetText(-1).Length, $w1, $w2, $line2, $found.GetText(-1), $rects) -join '|'",
+    );
+    assert_eq!(out, "24|hello |world|second line|line|1");
+    // Select() moved Foxing's selection to the match.
+    let sel = app.sel();
+    assert_eq!(sel, (20, 24), "selection after UIA Select");
+}
+
+#[test]
+fn uia_text_selection_events_reach_subscribers() {
+    let f = tmp("uia-events.txt");
+    std::fs::write(&f, "hello world").unwrap();
+    let app = App::launch(Some(&f));
+    // Subscribe like a screen reader, then move the selection through UIA.
+    let out = uia(
+        app.edit(),
+        "Add-Type -ReferencedAssemblies UIAutomationClient, UIAutomationTypes -TypeDefinition \
+           'public static class Ev { public static int N; \
+              public static void On(object s, System.Windows.Automation.AutomationEventArgs e) \
+              { System.Threading.Interlocked.Increment(ref N); } }'; \
+         $h = [System.Delegate]::CreateDelegate([System.Windows.Automation.AutomationEventHandler], [Ev].GetMethod('On')); \
+         [System.Windows.Automation.Automation]::AddAutomationEventHandler( \
+           [System.Windows.Automation.TextPattern]::TextSelectionChangedEvent, $e, $T::Element, $h); \
+         $tp = $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern); \
+         $tp.DocumentRange.FindText('world', $false, $false).Select(); \
+         $deadline = (Get-Date).AddSeconds(5); \
+         while ([Ev]::N -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }; \
+         [Ev]::N",
+    );
+    let hits: i32 = out
+        .lines()
+        .last()
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    assert!(hits >= 1, "TextSelectionChanged events seen: {out}");
+    assert_eq!(app.sel(), (6, 11));
+}
+
+#[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);
     app.type_text("some text that is here");
