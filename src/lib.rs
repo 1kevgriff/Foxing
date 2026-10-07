@@ -2,4 +2,5 @@
 
 pub mod buffer;
 pub mod document;
+pub mod editor;
 pub mod text;

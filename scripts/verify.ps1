@@ -2,8 +2,9 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
-$MaxBytes = 300KB
-$AllowedDlls = 'kernel32', 'user32', 'gdi32', 'comdlg32', 'shell32', 'comctl32', 'ntdll', 'api-ms-win-core-*'
+# Raised 300 -> 400 KB with the custom text engine (#14): buffer, editor, view, memchr SIMD.
+$MaxBytes = 400KB
+$AllowedDlls = 'kernel32', 'user32', 'gdi32', 'comdlg32', 'shell32', 'comctl32', 'imm32', 'ntdll', 'api-ms-win-core-*'
 $results = [System.Collections.Generic.List[object]]::new()
 
 function Step($name, [scriptblock]$body) {

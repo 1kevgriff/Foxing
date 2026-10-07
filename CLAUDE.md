@@ -24,11 +24,13 @@ regression pass.
 Mac and Linux versions are planned. Windows-only today, but structure code so the
 platform shell stays thin:
 
-- Logic goes in platform-neutral modules (like `src/text.rs`): decoding, search, folder
-  listing, status-bar values, settings. No Win32 types there; unit-test it there.
-- Win32 code (`src/main.rs`) only creates windows, routes messages, and calls into that logic.
-- Store text as `\n` internally where practical; CRLF is an EDIT-control detail, convert at
-  the Win32 boundary.
+- Logic goes in platform-neutral modules: `src/buffer.rs` (storage, line index, search),
+  `src/editor.rs` (selection, movement, undo, wrap layout, scrolling), `src/document.rs`,
+  `src/text.rs`. No Win32 types there; unit-test it there.
+- Win32 code (`src/win.rs` shell, `src/textview.rs` view) only creates windows, paints
+  rows the editor hands it, and turns input into editor calls.
+- Text is stored as the file's bytes (line endings preserved); new line breaks use the
+  file's detected EOL. Large-file targets: 2 GB opens, edits, searches, saves.
 - Use `std::path` / `std::fs` for file work, not Win32 file APIs.
 - Settings and paths: no hardcoded `%APPDATA%` outside the Win32 layer.
 

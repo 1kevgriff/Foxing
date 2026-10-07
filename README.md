@@ -10,14 +10,17 @@ paper.
 ## Why
 
 - **Small.** About 256 KB, a single exe with no runtime to install.
-- **Fast.** Raw Win32 and the native edit control. No framework, no GPU
-  startup.
+- **Fast.** Raw Win32 and its own text engine. No framework, no GPU startup.
+- **Big files.** Opens, edits, searches, and saves text files up to 2 GB.
+  A 2 GB file opens in about 1.5 s and typing stays instant, word wrap
+  included.
 - **Plain.** Opens UTF-8, UTF-16, and legacy Windows-1252 files. Saves
-  UTF-8.
+  UTF-8 and keeps the file's line endings (CRLF or LF) as they were.
 
 ## Features
 
 - New, Open, Save, Save As
+- Undo (`Ctrl+Z`) and redo (`Ctrl+Y`)
 - Find (`Ctrl+F`) and Find Next (`F3`)
 - Word wrap (Format menu)
 - Open from the command line (`foxing notes.txt`) or by dragging a file

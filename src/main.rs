@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod ids;
 #[cfg(windows)]
+mod textview;
+#[cfg(windows)]
 mod win;
 
 #[cfg(windows)]
