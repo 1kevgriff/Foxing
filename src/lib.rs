@@ -7,4 +7,5 @@ pub mod editor;
 pub mod folder;
 pub mod settings;
 pub mod text;
+pub mod textunits;
 pub mod ui;

@@ -115,6 +115,7 @@ static A11Y: uia::Source = uia::Source {
     tree: a11y_tree,
     act: a11y_act,
     class: "FoxingStatus",
+    text: None,
 };
 
 unsafe fn a11y_tree(hwnd: HWND) -> Node {

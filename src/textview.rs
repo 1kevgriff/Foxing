@@ -255,9 +255,11 @@ pub unsafe fn with<R>(hwnd: HWND, f: impl FnOnce(&mut Editor) -> R) -> R {
     finish(hwnd, sh);
     if changed {
         notify_change(hwnd);
+        uia::raise(hwnd, &A11Y, uia::TEXT_CHANGED_EVENT);
     }
     if moved {
         notify(hwnd, crate::ids::VN_CARET);
+        uia::raise(hwnd, &A11Y, uia::TEXT_SELECTION_CHANGED_EVENT);
     }
     r
 }
@@ -286,15 +288,105 @@ pub unsafe fn set_theme(hwnd: HWND, theme: Theme) {
     finish(hwnd, sh);
 }
 
-/// Longest text exposed through the UIA Value pattern (the Text pattern, #25 part 2,
-/// will serve documents of any size).
-const A11Y_VALUE_CHARS: usize = 100_000;
-
 static A11Y: uia::Source = uia::Source {
     tree: a11y_tree,
     act: a11y_act,
     class: "FoxingText",
+    text: Some(&TEXT_SOURCE),
 };
+
+static TEXT_SOURCE: uia::TextSource = uia::TextSource {
+    read: a11y_read,
+    selection: a11y_selection,
+    select: a11y_select,
+    visible: a11y_visible,
+    rects: a11y_rects,
+    offset_at: a11y_offset_at,
+    scroll_to: a11y_scroll_to,
+};
+
+unsafe fn a11y_read(hwnd: HWND, f: &mut dyn FnMut(&Buffer)) -> bool {
+    match shared(hwnd).map(|sh| sh.view.try_borrow()) {
+        Some(Ok(v)) => {
+            f(v.ed.buffer());
+            true
+        }
+        _ => false,
+    }
+}
+
+unsafe fn a11y_selection(hwnd: HWND) -> (usize, usize) {
+    match shared(hwnd).map(|sh| sh.view.try_borrow()) {
+        Some(Ok(v)) => {
+            let s = v.ed.selection();
+            (s.start, s.end)
+        }
+        _ => (0, 0),
+    }
+}
+
+unsafe fn a11y_select(hwnd: HWND, s: usize, e: usize) {
+    with(hwnd, |ed| ed.set_selection(s, e));
+}
+
+unsafe fn a11y_visible(hwnd: HWND) -> (usize, usize) {
+    match shared(hwnd).map(|sh| sh.view.try_borrow()) {
+        Some(Ok(v)) => {
+            let rows = v.ed.visible_rows();
+            match (rows.first(), rows.last()) {
+                (Some(a), Some(b)) => (a.range.start, b.range.end),
+                _ => (0, 0),
+            }
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Rectangles (client px) covering `start..end` on visible rows.
+unsafe fn a11y_rects(hwnd: HWND, start: usize, end: usize) -> Vec<Rect> {
+    let Some(Ok(v)) = shared(hwnd).map(|sh| sh.view.try_borrow()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, row) in v.ed.visible_rows().iter().enumerate() {
+        if end < row.range.start || start > row.range.end {
+            continue;
+        }
+        let glyphs = v.ed.glyphs(row);
+        let row_end = glyphs.last().map_or(0, |g| g.col + g.cells);
+        let col = |pos: usize| {
+            glyphs
+                .iter()
+                .find(|g| g.at >= pos)
+                .map_or(row_end, |g| g.col)
+        };
+        let (c0, c1) = (col(start.max(row.range.start)), col(end.min(row.range.end)));
+        out.push(Rect::new(
+            PAD + c0 as i32 * v.cell_w,
+            i as i32 * v.line_h,
+            (c1.saturating_sub(c0)) as i32 * v.cell_w,
+            v.line_h,
+        ));
+    }
+    out
+}
+
+unsafe fn a11y_offset_at(hwnd: HWND, x: i32, y: i32) -> usize {
+    match shared(hwnd).map(|sh| sh.view.try_borrow()) {
+        Some(Ok(v)) => hit(&v, x, y),
+        _ => 0,
+    }
+}
+
+unsafe fn a11y_scroll_to(hwnd: HWND, pos: usize) {
+    with(hwnd, |ed| {
+        let line = ed.buffer().line_of(pos.min(ed.buffer().len()));
+        let top = ed.top_line();
+        if line < top || line >= top + ed.view_rows() {
+            ed.scroll_to_line(line);
+        }
+    });
+}
 
 unsafe fn a11y_tree(hwnd: HWND) -> Node {
     let Some(sh) = shared(hwnd) else {
@@ -303,9 +395,7 @@ unsafe fn a11y_tree(hwnd: HWND) -> Node {
     let (w, h) = sh.size.get();
     let mut n = Node::new(Role::Document, "Text editor", Rect::new(0, 0, w, h));
     n.focused = sh.focused.get();
-    if let Ok(v) = sh.view.try_borrow() {
-        n.value = Some(v.ed.buffer().chars_from(0).take(A11Y_VALUE_CHARS).collect());
-    }
+    // The value (document text) is read lazily by the provider, only when asked.
     n
 }
 
@@ -756,9 +846,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             if changed && msg != WM_SETTEXT {
                 notify_change(hwnd);
+                uia::raise(hwnd, &A11Y, uia::TEXT_CHANGED_EVENT);
             }
             if moved {
                 notify(hwnd, crate::ids::VN_CARET);
+                uia::raise(hwnd, &A11Y, uia::TEXT_SELECTION_CHANGED_EVENT);
             }
             r
         }
