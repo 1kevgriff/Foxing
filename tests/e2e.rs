@@ -14,14 +14,7 @@ use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 use windows_sys::core::BOOL;
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-use windows_sys::Win32::System::Memory::{
-    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE,
-};
-use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, WaitForInputIdle, PROCESS_QUERY_INFORMATION,
-    PROCESS_VM_OPERATION, PROCESS_VM_READ,
-};
+use windows_sys::Win32::System::Threading::{GetProcessTimes, WaitForInputIdle};
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -174,27 +167,13 @@ impl App {
         unsafe { GetDlgItem(self.hwnd, IDC_STATUS as i32) }
     }
 
-    /// Text of a status bar part. SB_GETTEXTW isn't marshaled across processes, so the
-    /// buffer is allocated inside Foxing's address space and read back.
+    /// Text of a status bar part (the custom bar answers WM_GETTEXT with tab-joined parts).
     fn status_text(&self, part: usize) -> String {
-        const CAP: usize = 256;
-        unsafe {
-            let proc = OpenProcess(
-                PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-                0,
-                self.pid(),
-            );
-            assert!(!proc.is_null(), "OpenProcess");
-            let remote = VirtualAllocEx(proc, null_mut(), CAP * 2, MEM_COMMIT, PAGE_READWRITE);
-            assert!(!remote.is_null(), "VirtualAllocEx");
-            let r = SendMessageW(self.status(), SB_GETTEXTW, part, remote as LPARAM) as usize;
-            let len = (r & 0xFFFF).min(CAP - 1);
-            let mut buf = vec![0u16; len];
-            ReadProcessMemory(proc, remote, buf.as_mut_ptr().cast(), len * 2, null_mut());
-            VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
-            CloseHandle(proc);
-            String::from_utf16_lossy(&buf)
-        }
+        text_of(self.status())
+            .split('\t')
+            .nth(part)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     fn alive(&mut self) -> bool {

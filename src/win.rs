@@ -1,6 +1,7 @@
 //! Win32 shell: windows, menus, dialogs. Document and text logic live in the library.
 
 use crate::ids::*;
+use crate::statusview;
 use crate::textview;
 use foxing::document::Document;
 use std::cell::{Cell, RefCell};
@@ -25,7 +26,7 @@ const FIND_BUF_LEN: usize = 256;
 /// Status bar parts: spacer, Ln/Col, line count, line ending, encoding.
 const STATUS_PARTS: usize = 5;
 /// Widths (96-DPI pixels) of the fixed parts, right to left after the spacer.
-const STATUS_WIDTHS: [i32; STATUS_PARTS - 1] = [150, 140, 120, 80];
+static STATUS_WIDTHS: [i32; STATUS_PARTS - 1] = [150, 140, 120, 80];
 
 struct App {
     main: Cell<HWND>,
@@ -37,8 +38,6 @@ struct App {
     find_msg: Cell<u32>,
     find: Cell<*mut FINDREPLACEW>,
     status: Cell<HWND>,
-    /// Last text per status part, to skip redundant SB_SETTEXT (avoids flicker).
-    status_parts: RefCell<[String; STATUS_PARTS]>,
 }
 
 thread_local! {
@@ -52,7 +51,6 @@ thread_local! {
         find_msg: Cell::new(0),
         find: Cell::new(null_mut()),
         status: Cell::new(null_mut()),
-        status_parts: RefCell::new([const { String::new() }; STATUS_PARTS]),
     } };
 }
 
@@ -158,16 +156,7 @@ unsafe fn update_status() {
             "UTF-8".to_owned(),
         ]
     });
-    app(|a| {
-        let mut last = a.status_parts.borrow_mut();
-        for (i, text) in parts.into_iter().enumerate() {
-            if last[i] != text {
-                let w = wide(&text);
-                SendMessageW(status, SB_SETTEXTW, i, w.as_ptr() as LPARAM);
-                last[i] = text;
-            }
-        }
-    });
+    statusview::set_texts(status, &parts);
 }
 
 /// The status bar's own visibility (not its parent's, which is hidden during startup).
@@ -182,20 +171,9 @@ unsafe fn layout_children(hwnd: HWND) {
     GetClientRect(hwnd, &mut rc);
     let mut bottom = rc.bottom;
     if status_shown(status) {
-        SendMessageW(status, WM_SIZE, 0, 0);
-        let mut sr: RECT = zeroed();
-        GetWindowRect(status, &mut sr);
-        bottom -= sr.bottom - sr.top;
-        let dpi = GetDpiForWindow(hwnd) as i32;
-        let mut edges = [0i32; STATUS_PARTS];
-        let mut right = rc.right;
-        edges[STATUS_PARTS - 1] = -1;
-        for i in (1..STATUS_PARTS - 1).rev() {
-            right -= STATUS_WIDTHS[i] * dpi / 96;
-            edges[i] = right;
-        }
-        edges[0] = right - STATUS_WIDTHS[0] * dpi / 96;
-        SendMessageW(status, SB_SETPARTS, STATUS_PARTS, edges.as_ptr() as LPARAM);
+        let h = statusview::height(status);
+        bottom -= h;
+        MoveWindow(status, 0, bottom.max(0), rc.right, h, 1);
     }
     MoveWindow(edit, 0, 0, rc.right, bottom.max(0), 1);
 }
@@ -208,7 +186,6 @@ unsafe fn toggle_status_bar() {
     CheckMenuItem(GetMenu(main), ID_STATUS_BAR as u32, MF_BYCOMMAND | check);
     layout_children(main);
     if show {
-        app(|a| *a.status_parts.borrow_mut() = [const { String::new() }; STATUS_PARTS]);
         update_status();
     }
 }
@@ -503,20 +480,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.font.set(make_font(GetDpiForWindow(hwnd)));
             });
             let edit = create_edit(hwnd);
-            let status = CreateWindowExW(
-                0,
-                STATUSCLASSNAMEW,
-                null(),
-                WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
-                0,
-                0,
-                0,
-                0,
-                hwnd,
-                IDC_STATUS as usize as HMENU,
-                GetModuleHandleW(null()),
-                null(),
-            );
+            let status = statusview::create(hwnd, IDC_STATUS, &STATUS_WIDTHS);
             app(|a| {
                 a.edit.set(edit);
                 a.status.set(status);
@@ -546,6 +510,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let font = make_font(hiword(wp) as u32);
             let old = app(|a| a.font.replace(font));
             SendMessageW(app(|a| a.edit.get()), WM_SETFONT, font as WPARAM, 1);
+            statusview::set_dpi(app(|a| a.status.get()), hiword(wp) as u32);
             DeleteObject(old);
             SetWindowPos(
                 hwnd,
@@ -575,6 +540,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 pub fn run() {
     unsafe {
         textview::register();
+        statusview::register();
         let hinst = GetModuleHandleW(null());
         let class = w!("foxing");
         let wc = WNDCLASSW {
