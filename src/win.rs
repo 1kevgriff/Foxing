@@ -5,6 +5,7 @@ use crate::menuview;
 use crate::statusview;
 use crate::textview;
 use foxing::document::Document;
+use foxing::settings::{Settings, ThemeChoice, WindowRect};
 use foxing::ui::menu::{Menu, MenuItem, MenuKey};
 use foxing::ui::Theme;
 use std::cell::{Cell, RefCell};
@@ -49,6 +50,8 @@ struct App {
     menubar: Cell<HWND>,
     /// ID_THEME_SYSTEM, ID_THEME_LIGHT, or ID_THEME_DARK.
     theme_choice: Cell<u16>,
+    /// Loaded at startup; updated and saved whenever a remembered choice changes.
+    settings: RefCell<Settings>,
 }
 
 thread_local! {
@@ -64,6 +67,14 @@ thread_local! {
         status: Cell::new(null_mut()),
         menubar: Cell::new(null_mut()),
         theme_choice: Cell::new(ID_THEME_SYSTEM),
+        settings: RefCell::new(Settings {
+            theme: ThemeChoice::System,
+            wrap: false,
+            status_bar: true,
+            window: None,
+            maximized: false,
+            last_folder: None,
+        }),
     } };
 }
 
@@ -247,6 +258,110 @@ unsafe fn apply_theme() {
     }
 }
 
+/// `FOXING_SETTINGS` (used by tests) or `%APPDATA%\\Foxing\\settings.ini`.
+fn settings_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("FOXING_SETTINGS") {
+        return PathBuf::from(p);
+    }
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Foxing")
+        .join("settings.ini")
+}
+
+/// Captures the current view choices and window placement, then writes them.
+unsafe fn save_settings() {
+    let (main, status, choice, wrap) = app(|a| {
+        (
+            a.main.get(),
+            a.status.get(),
+            a.theme_choice.get(),
+            a.wrap.get(),
+        )
+    });
+    let mut s = app(|a| a.settings.borrow().clone());
+    s.theme = match choice {
+        ID_THEME_LIGHT => ThemeChoice::Light,
+        ID_THEME_DARK => ThemeChoice::Dark,
+        _ => ThemeChoice::System,
+    };
+    s.wrap = wrap;
+    s.status_bar = status_shown(status);
+    let mut wp: WINDOWPLACEMENT = zeroed();
+    wp.length = size_of::<WINDOWPLACEMENT>() as u32;
+    if GetWindowPlacement(main, &mut wp) != 0 {
+        let r = wp.rcNormalPosition;
+        s.window = Some(WindowRect {
+            x: r.left,
+            y: r.top,
+            w: r.right - r.left,
+            h: r.bottom - r.top,
+        });
+        s.maximized = wp.showCmd == SW_SHOWMAXIMIZED as u32;
+    }
+    // Failing to remember a preference isn't worth interrupting the user over.
+    let _ = s.save(&settings_path());
+    app(|a| *a.settings.borrow_mut() = s);
+}
+
+/// Applies loaded settings to the freshly created children (before showing).
+unsafe fn apply_settings(hwnd: HWND) {
+    let (edit, status, bar) = app(|a| (a.edit.get(), a.status.get(), a.menubar.get()));
+    let s = app(|a| a.settings.borrow().clone());
+    app(|a| {
+        a.theme_choice.set(match s.theme {
+            ThemeChoice::Light => ID_THEME_LIGHT,
+            ThemeChoice::Dark => ID_THEME_DARK,
+            ThemeChoice::System => ID_THEME_SYSTEM,
+        })
+    });
+    if s.wrap {
+        app(|a| a.wrap.set(true));
+        textview::set_wrap(edit, true);
+        menuview::set_checked(bar, ID_WRAP, true);
+    }
+    if !s.status_bar {
+        ShowWindow(status, SW_HIDE);
+        menuview::set_checked(bar, ID_STATUS_BAR, false);
+        layout_children(hwnd);
+    }
+}
+
+/// Shows the main window at its remembered place, if that's still on a monitor.
+unsafe fn show_main(hwnd: HWND) {
+    let s = app(|a| a.settings.borrow().clone());
+    let rect = s.window.map(|r| RECT {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
+    });
+    match rect.filter(|rc| !MonitorFromRect(rc, MONITOR_DEFAULTTONULL).is_null()) {
+        Some(rc) => {
+            let mut wp: WINDOWPLACEMENT = zeroed();
+            wp.length = size_of::<WINDOWPLACEMENT>() as u32;
+            wp.showCmd = if s.maximized {
+                SW_SHOWMAXIMIZED
+            } else {
+                SW_SHOWNORMAL
+            } as u32;
+            wp.rcNormalPosition = rc;
+            SetWindowPlacement(hwnd, &wp);
+        }
+        None => {
+            ShowWindow(
+                hwnd,
+                if s.maximized {
+                    SW_SHOWMAXIMIZED
+                } else {
+                    SW_SHOWDEFAULT
+                },
+            );
+        }
+    }
+}
+
 unsafe fn toggle_status_bar() {
     let (main, status) = app(|a| (a.main.get(), a.status.get()));
     let show = !status_shown(status);
@@ -256,6 +371,7 @@ unsafe fn toggle_status_bar() {
     if show {
         update_status();
     }
+    save_settings();
 }
 
 unsafe fn error_box(msg: &str) {
@@ -369,6 +485,7 @@ unsafe fn toggle_wrap() {
     app(|a| a.wrap.set(wrap));
     textview::set_wrap(edit, wrap);
     menuview::set_checked(app(|a| a.menubar.get()), ID_WRAP, wrap);
+    save_settings();
     SetFocus(edit);
 }
 
@@ -521,6 +638,7 @@ unsafe fn on_command(id: u16, code: u16) {
         ID_THEME_SYSTEM | ID_THEME_LIGHT | ID_THEME_DARK => {
             app(|a| a.theme_choice.set(id));
             apply_theme();
+            save_settings();
         }
         _ => {}
     }
@@ -563,6 +681,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             layout_children(hwnd);
             update_status();
+            apply_settings(hwnd);
             // Before the window is shown, so a dark start never flashes light.
             apply_theme();
             0
@@ -628,6 +747,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_DESTROY => {
+            save_settings();
             PostQuitMessage(0);
             0
         }
@@ -651,6 +771,8 @@ pub fn run() {
         };
         RegisterClassW(&wc);
         app(|a| a.find_msg.set(RegisterWindowMessageW(FINDMSGSTRINGW)));
+        let settings = Settings::load(&settings_path());
+        app(|a| *a.settings.borrow_mut() = settings);
 
         let hwnd = CreateWindowExW(
             WS_EX_ACCEPTFILES,
@@ -669,7 +791,7 @@ pub fn run() {
         if let Some(arg) = std::env::args_os().nth(1) {
             load_file(PathBuf::from(arg));
         }
-        ShowWindow(hwnd, SW_SHOWDEFAULT);
+        show_main(hwnd);
 
         let ctrl = FVIRTKEY | FCONTROL;
         let accels = [
