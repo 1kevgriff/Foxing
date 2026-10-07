@@ -5,6 +5,8 @@ mod gdi;
 #[cfg(windows)]
 mod ids;
 #[cfg(windows)]
+mod menuview;
+#[cfg(windows)]
 mod statusview;
 #[cfg(windows)]
 mod textview;

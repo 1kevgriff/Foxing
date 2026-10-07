@@ -3,6 +3,7 @@
 //! Components lay themselves out and emit a [`DrawList`]; each platform renders the list
 //! and supplies text measurement through [`Measure`]. Nothing here touches an OS API.
 
+pub mod menu;
 pub mod scroll;
 pub mod status;
 
@@ -90,6 +91,12 @@ pub enum Cmd {
         text: String,
         clip: Rect,
     },
+    /// Connected line segments (any direction), `width` px thick.
+    Polyline {
+        points: Vec<(i32, i32)>,
+        color: Color,
+        width: i32,
+    },
     /// Grid text: one advance (px) per char, optional background behind the run.
     Glyphs {
         x: i32,
@@ -113,6 +120,37 @@ impl DrawList {
 
     pub fn line(&mut self, from: (i32, i32), to: (i32, i32), color: Color) {
         self.cmds.push(Cmd::Line { from, to, color });
+    }
+
+    /// Moves every command by (dx, dy), e.g. to draw into a window placed elsewhere.
+    pub fn offset(&mut self, dx: i32, dy: i32) {
+        let mv = |r: &mut Rect| {
+            r.x += dx;
+            r.y += dy;
+        };
+        for c in &mut self.cmds {
+            match c {
+                Cmd::Fill { rect, .. } => mv(rect),
+                Cmd::Line { from, to, .. } => {
+                    *from = (from.0 + dx, from.1 + dy);
+                    *to = (to.0 + dx, to.1 + dy);
+                }
+                Cmd::Text { x, y, clip, .. } => {
+                    *x += dx;
+                    *y += dy;
+                    mv(clip);
+                }
+                Cmd::Polyline { points, .. } => {
+                    for p in points {
+                        *p = (p.0 + dx, p.1 + dy);
+                    }
+                }
+                Cmd::Glyphs { x, y, .. } => {
+                    *x += dx;
+                    *y += dy;
+                }
+            }
+        }
     }
 
     pub fn text(&mut self, x: i32, y: i32, font: Font, color: Color, text: &str, clip: Rect) {
@@ -205,6 +243,31 @@ mod tests {
         assert_eq!(r.inset(50).w, 0);
         assert!(r.intersects(&Rect::new(39, 59, 5, 5)));
         assert!(!r.intersects(&Rect::new(40, 20, 5, 5)));
+    }
+
+    #[test]
+    fn offset_moves_everything() {
+        let mut dl = DrawList::default();
+        dl.fill(Rect::new(1, 2, 3, 4), 0);
+        dl.line((0, 0), (5, 0), 0);
+        dl.text(1, 1, Font::Ui, 0, "x", Rect::new(0, 0, 9, 9));
+        dl.offset(10, 20);
+        assert_eq!(
+            dl.cmds[0],
+            Cmd::Fill {
+                rect: Rect::new(11, 22, 3, 4),
+                color: 0
+            }
+        );
+        assert!(matches!(
+            dl.cmds[1],
+            Cmd::Line {
+                from: (10, 20),
+                to: (15, 20),
+                ..
+            }
+        ));
+        assert!(matches!(dl.cmds[2], Cmd::Text { x: 11, y: 21, .. }));
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Win32 shell: windows, menus, dialogs. Document and text logic live in the library.
 
 use crate::ids::*;
+use crate::menuview;
 use crate::statusview;
 use crate::textview;
 use foxing::document::Document;
+use foxing::ui::menu::{Menu, MenuItem, MenuKey};
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::mem::{size_of, zeroed};
@@ -18,7 +20,10 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, VK_DOWN, VK_ESCAPE, VK_F10, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_UP,
+};
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -38,6 +43,7 @@ struct App {
     find_msg: Cell<u32>,
     find: Cell<*mut FINDREPLACEW>,
     status: Cell<HWND>,
+    menubar: Cell<HWND>,
 }
 
 thread_local! {
@@ -51,6 +57,7 @@ thread_local! {
         find_msg: Cell::new(0),
         find: Cell::new(null_mut()),
         status: Cell::new(null_mut()),
+        menubar: Cell::new(null_mut()),
     } };
 }
 
@@ -164,26 +171,33 @@ unsafe fn status_shown(status: HWND) -> bool {
     !status.is_null() && GetWindowLongW(status, GWL_STYLE) as u32 & WS_VISIBLE != 0
 }
 
-/// Sizes the status bar (if shown) and gives the text view the rest.
+/// Menu bar on top, status bar (if shown) at the bottom, text view in between.
 unsafe fn layout_children(hwnd: HWND) {
-    let (edit, status) = app(|a| (a.edit.get(), a.status.get()));
+    let (edit, status, bar) = app(|a| (a.edit.get(), a.status.get(), a.menubar.get()));
     let mut rc: RECT = zeroed();
     GetClientRect(hwnd, &mut rc);
+    let top = if bar.is_null() {
+        0
+    } else {
+        menuview::height(bar)
+    };
+    if !bar.is_null() {
+        MoveWindow(bar, 0, 0, rc.right, top, 1);
+    }
     let mut bottom = rc.bottom;
     if status_shown(status) {
         let h = statusview::height(status);
         bottom -= h;
         MoveWindow(status, 0, bottom.max(0), rc.right, h, 1);
     }
-    MoveWindow(edit, 0, 0, rc.right, bottom.max(0), 1);
+    MoveWindow(edit, 0, top, rc.right, (bottom - top).max(0), 1);
 }
 
 unsafe fn toggle_status_bar() {
     let (main, status) = app(|a| (a.main.get(), a.status.get()));
     let show = !status_shown(status);
     ShowWindow(status, if show { SW_SHOW } else { SW_HIDE });
-    let check = if show { MF_CHECKED } else { MF_UNCHECKED };
-    CheckMenuItem(GetMenu(main), ID_STATUS_BAR as u32, MF_BYCOMMAND | check);
+    menuview::set_checked(app(|a| a.menubar.get()), ID_STATUS_BAR, show);
     layout_children(main);
     if show {
         update_status();
@@ -296,12 +310,11 @@ unsafe fn confirm_discard() -> bool {
 }
 
 unsafe fn toggle_wrap() {
-    let (main, edit) = app(|a| (a.main.get(), a.edit.get()));
+    let edit = app(|a| a.edit.get());
     let wrap = !app(|a| a.wrap.get());
     app(|a| a.wrap.set(wrap));
     textview::set_wrap(edit, wrap);
-    let check = if wrap { MF_CHECKED } else { MF_UNCHECKED };
-    CheckMenuItem(GetMenu(main), ID_WRAP as u32, MF_BYCOMMAND | check);
+    menuview::set_checked(app(|a| a.menubar.get()), ID_WRAP, wrap);
     SetFocus(edit);
 }
 
@@ -355,47 +368,41 @@ unsafe fn find_next() {
     }
 }
 
-unsafe fn build_menu() -> HMENU {
-    let item = |m: HMENU, id: u16, label: *const u16| {
-        AppendMenuW(m, MF_STRING, id as usize, label);
-    };
-    let sep = |m: HMENU| {
-        AppendMenuW(m, MF_SEPARATOR, 0, null());
-    };
-
-    let file = CreatePopupMenu();
-    item(file, ID_NEW, w!("&New\tCtrl+N"));
-    item(file, ID_OPEN, w!("&Open...\tCtrl+O"));
-    item(file, ID_SAVE, w!("&Save\tCtrl+S"));
-    item(file, ID_SAVE_AS, w!("Save &As...\tCtrl+Shift+S"));
-    sep(file);
-    item(file, ID_EXIT, w!("E&xit"));
-
-    let edit = CreatePopupMenu();
-    item(edit, ID_UNDO, w!("&Undo\tCtrl+Z"));
-    sep(edit);
-    item(edit, ID_CUT, w!("Cu&t\tCtrl+X"));
-    item(edit, ID_COPY, w!("&Copy\tCtrl+C"));
-    item(edit, ID_PASTE, w!("&Paste\tCtrl+V"));
-    sep(edit);
-    item(edit, ID_FIND, w!("&Find...\tCtrl+F"));
-    item(edit, ID_FIND_NEXT, w!("Find &Next\tF3"));
-    sep(edit);
-    item(edit, ID_SELECT_ALL, w!("Select &All\tCtrl+A"));
-
-    let format = CreatePopupMenu();
-    item(format, ID_WRAP, w!("&Word Wrap"));
-
-    let view = CreatePopupMenu();
-    item(view, ID_STATUS_BAR, w!("&Status Bar"));
-    CheckMenuItem(view, ID_STATUS_BAR as u32, MF_BYCOMMAND | MF_CHECKED);
-
-    let bar = CreateMenu();
-    AppendMenuW(bar, MF_POPUP, file as usize, w!("&File"));
-    AppendMenuW(bar, MF_POPUP, edit as usize, w!("&Edit"));
-    AppendMenuW(bar, MF_POPUP, format as usize, w!("F&ormat"));
-    AppendMenuW(bar, MF_POPUP, view as usize, w!("&View"));
-    bar
+fn menus() -> Vec<Menu> {
+    let it = MenuItem::new;
+    let sep = MenuItem::separator;
+    let mut status_bar = it("&Status Bar", "", ID_STATUS_BAR);
+    status_bar.checked = true;
+    vec![
+        Menu::new(
+            "&File",
+            vec![
+                it("&New", "Ctrl+N", ID_NEW),
+                it("&Open...", "Ctrl+O", ID_OPEN),
+                it("&Save", "Ctrl+S", ID_SAVE),
+                it("Save &As...", "Ctrl+Shift+S", ID_SAVE_AS),
+                sep(),
+                it("E&xit", "", ID_EXIT),
+            ],
+        ),
+        Menu::new(
+            "&Edit",
+            vec![
+                it("&Undo", "Ctrl+Z", ID_UNDO),
+                sep(),
+                it("Cu&t", "Ctrl+X", ID_CUT),
+                it("&Copy", "Ctrl+C", ID_COPY),
+                it("&Paste", "Ctrl+V", ID_PASTE),
+                sep(),
+                it("&Find...", "Ctrl+F", ID_FIND),
+                it("Find &Next", "F3", ID_FIND_NEXT),
+                sep(),
+                it("Select &All", "Ctrl+A", ID_SELECT_ALL),
+            ],
+        ),
+        Menu::new("F&ormat", vec![it("&Word Wrap", "", ID_WRAP)]),
+        Menu::new("&View", vec![status_bar]),
+    ]
 }
 
 unsafe fn on_command(id: u16, code: u16) {
@@ -481,9 +488,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             let edit = create_edit(hwnd);
             let status = statusview::create(hwnd, IDC_STATUS, &STATUS_WIDTHS);
+            let bar = menuview::create(hwnd, IDC_MENUBAR, menus());
             app(|a| {
                 a.edit.set(edit);
                 a.status.set(status);
+                a.menubar.set(bar);
             });
             layout_children(hwnd);
             update_status();
@@ -511,6 +520,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let old = app(|a| a.font.replace(font));
             SendMessageW(app(|a| a.edit.get()), WM_SETFONT, font as WPARAM, 1);
             statusview::set_dpi(app(|a| a.status.get()), hiword(wp) as u32);
+            menuview::set_dpi(app(|a| a.menubar.get()), hiword(wp) as u32);
             DeleteObject(old);
             SetWindowPos(
                 hwnd,
@@ -522,6 +532,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
             0
+        }
+        // Leaving the window (or moving it) dismisses an open menu.
+        WM_ACTIVATE | WM_MOVE => {
+            if msg == WM_MOVE || loword(wp) as u32 == WA_INACTIVE {
+                menuview::close(app(|a| a.menubar.get()));
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_CLOSE => {
             if confirm_discard() {
@@ -541,6 +558,7 @@ pub fn run() {
     unsafe {
         textview::register();
         statusview::register();
+        menuview::register();
         let hinst = GetModuleHandleW(null());
         let class = w!("foxing");
         let wc = WNDCLASSW {
@@ -563,7 +581,7 @@ pub fn run() {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             null_mut(),
-            build_menu(),
+            null_mut(),
             hinst,
             null(),
         );
@@ -612,8 +630,65 @@ pub fn run() {
         ];
         let haccel = CreateAcceleratorTableW(accels.as_ptr(), accels.len() as i32);
 
+        let bar = app(|a| a.menubar.get());
+        // Alt pressed and released with nothing in between toggles menu mode.
+        let mut alt_tap = false;
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            let (m, vk) = (msg.message, msg.wParam as u16);
+            let is_key = matches!(
+                m,
+                WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR
+            );
+            if m == WM_SYSKEYDOWN && vk == VK_MENU {
+                // Ignore auto-repeat while Alt is held.
+                if msg.lParam & (1 << 30) == 0 {
+                    alt_tap = true;
+                }
+                continue;
+            }
+            if m == WM_SYSKEYUP && vk == VK_MENU {
+                if std::mem::take(&mut alt_tap) {
+                    menuview::toggle_keyboard(bar);
+                }
+                continue;
+            }
+            if m == WM_KEYDOWN || m == WM_SYSKEYDOWN {
+                alt_tap = false;
+            }
+            if m == WM_SYSKEYDOWN && vk == VK_F10 && GetKeyState(VK_SHIFT as i32) >= 0 {
+                menuview::toggle_keyboard(bar);
+                continue;
+            }
+            if is_key && menuview::is_active(bar) {
+                let key = match (m, vk) {
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_LEFT) => Some(MenuKey::Left),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_RIGHT) => Some(MenuKey::Right),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_UP) => Some(MenuKey::Up),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_DOWN) => Some(MenuKey::Down),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_RETURN) => Some(MenuKey::Enter),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, VK_ESCAPE) => Some(MenuKey::Escape),
+                    (WM_CHAR | WM_SYSCHAR, _) => char::from_u32(msg.wParam as u32)
+                        .filter(|c| c.is_alphanumeric())
+                        .map(MenuKey::Char),
+                    (WM_KEYDOWN | WM_SYSKEYDOWN, _) => {
+                        // Turn letter keys into WM_CHAR for mnemonics; don't dispatch.
+                        TranslateMessage(&msg);
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(k) = key {
+                    menuview::key(bar, k);
+                }
+                continue;
+            }
+            if m == WM_SYSCHAR {
+                let c = char::from_u32(msg.wParam as u32).filter(|c| c.is_alphanumeric());
+                if c.is_some_and(|c| menuview::mnemonic(bar, c)) {
+                    continue;
+                }
+            }
             let dlg = app(|a| a.find_dlg.get());
             if !dlg.is_null() && IsDialogMessageW(dlg, &msg) != 0 {
                 continue;

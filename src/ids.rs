@@ -2,6 +2,7 @@
 
 pub const IDC_EDIT: u16 = 100;
 pub const IDC_STATUS: u16 = 101;
+pub const IDC_MENUBAR: u16 = 102;
 
 /// Text view notification (WM_COMMAND high word): caret or selection moved.
 pub const VN_CARET: u16 = 0x8001;
