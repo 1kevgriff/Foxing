@@ -115,7 +115,16 @@ impl Drop for App {
 
 impl App {
     fn launch(file: Option<&PathBuf>) -> App {
+        // Every launch gets its own settings file so tests never see each other's (or
+        // the user's) remembered choices.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self::launch_with(file, &tmp(&format!("settings-{n}.ini")))
+    }
+
+    fn launch_with(file: Option<&PathBuf>, settings: &PathBuf) -> App {
         let mut cmd = Command::new(EXE);
+        cmd.env("FOXING_SETTINGS", settings);
         if let Some(f) = file {
             cmd.arg(f);
         }
@@ -468,6 +477,33 @@ fn theme_menu_switches_light_and_dark() {
 }
 
 #[test]
+fn settings_are_remembered_between_launches() {
+    let ini = tmp("remember.ini");
+    let _ = std::fs::remove_file(&ini);
+    let mut app = App::launch_with(None, &ini);
+    app.cmd(ID_THEME_DARK);
+    app.cmd(ID_WRAP);
+    app.cmd(ID_STATUS_BAR);
+    unsafe { PostMessageW(app.hwnd, WM_CLOSE, 0, 0) };
+    wait_for(5000, || (!app.alive()).then_some(())).expect("clean exit");
+    let text = std::fs::read_to_string(&ini).unwrap();
+    assert!(
+        text.contains("theme=dark") && text.contains("wrap=true"),
+        "{text}"
+    );
+
+    let app = App::launch_with(None, &ini);
+    assert!(app.menu_checked(ID_THEME_DARK));
+    assert!(app.menu_checked(ID_WRAP));
+    assert!(!app.menu_checked(ID_STATUS_BAR));
+    assert_eq!(unsafe { IsWindowVisible(app.status()) }, 0);
+    assert_eq!(
+        unsafe { SendMessageW(app.edit(), VM_GETBG, 0, 0) } as u32,
+        0x1E1E1E
+    );
+}
+
+#[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);
     app.type_text("some text that is here");
@@ -565,7 +601,10 @@ fn launch_time() {
     let (mut cpu, mut wall) = (vec![], vec![]);
     for _ in 0..5 {
         let start = Instant::now();
-        let child = Command::new(EXE).spawn().unwrap();
+        let child = Command::new(EXE)
+            .env("FOXING_SETTINGS", tmp("settings-launch-time.ini"))
+            .spawn()
+            .unwrap();
         let pid = child.id();
         let hwnd = wait_for(10000, || find_window(pid, "foxing", None)).expect("main window");
         wall.push(start.elapsed());

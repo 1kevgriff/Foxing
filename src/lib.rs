@@ -4,5 +4,6 @@
 pub mod buffer;
 pub mod document;
 pub mod editor;
+pub mod settings;
 pub mod text;
 pub mod ui;
