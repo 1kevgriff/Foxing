@@ -135,16 +135,20 @@ unsafe fn finish(hwnd: HWND, sh: &Shared) {
 /// own message handling.
 pub unsafe fn with<R>(hwnd: HWND, f: impl FnOnce(&mut Editor) -> R) -> R {
     let sh = shared(hwnd).expect("text view state");
-    let (r, changed) = {
+    let (r, changed, moved) = {
         let mut v = sh.view.borrow_mut();
         sync(&mut v, sh);
-        let before = v.ed.version();
+        let before = (v.ed.version(), v.ed.anchor(), v.ed.caret());
         let r = f(&mut v.ed);
-        (r, v.ed.version() != before)
+        let after = (v.ed.version(), v.ed.anchor(), v.ed.caret());
+        (r, after.0 != before.0, after != before)
     };
     finish(hwnd, sh);
     if changed {
         notify_change(hwnd);
+    }
+    if moved {
+        notify(hwnd, crate::ids::VN_CARET);
     }
     r
 }
@@ -171,14 +175,25 @@ pub unsafe fn set_wrap(hwnd: HWND, wrap: bool) {
     finish(hwnd, sh);
 }
 
-unsafe fn notify_change(hwnd: HWND) {
+unsafe fn notify(hwnd: HWND, code: u16) {
     let id = GetDlgCtrlID(hwnd) as usize;
     SendMessageW(
         GetParent(hwnd),
         WM_COMMAND,
-        id | ((EN_CHANGE as usize) << 16),
+        id | ((code as usize) << 16),
         hwnd as LPARAM,
     );
+}
+
+unsafe fn notify_change(hwnd: HWND) {
+    notify(hwnd, EN_CHANGE as u16);
+}
+
+/// Reads the editor without refreshing or notifying (for status display).
+pub unsafe fn peek<R>(hwnd: HWND, f: impl FnOnce(&Editor) -> R) -> R {
+    let sh = shared(hwnd).expect("text view state");
+    let v = sh.view.borrow();
+    f(&v.ed)
 }
 
 unsafe fn measure(v: &mut View) {
@@ -558,15 +573,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 
     // Everything else may edit; notify the parent after the borrow ends.
-    let (result, changed) = match sh.view.try_borrow_mut() {
+    let (result, changed, moved) = match sh.view.try_borrow_mut() {
         Ok(mut v) => {
             sync(&mut v, sh);
-            let before = v.ed.version();
+            let before = (v.ed.version(), v.ed.anchor(), v.ed.caret());
             let r = handle(hwnd, &mut v, msg, wp, lp);
             sh.line_h.set(v.line_h);
-            (r, v.ed.version() != before)
+            let after = (v.ed.version(), v.ed.anchor(), v.ed.caret());
+            (r, after.0 != before.0, after != before)
         }
-        Err(_) => (None, false),
+        Err(_) => (None, false, false),
     };
     match result {
         Some(r) => {
@@ -575,6 +591,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             if changed && msg != WM_SETTEXT {
                 notify_change(hwnd);
+            }
+            if moved {
+                notify(hwnd, crate::ids::VN_CARET);
             }
             r
         }

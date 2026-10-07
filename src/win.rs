@@ -22,6 +22,10 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const FIND_BUF_LEN: usize = 256;
+/// Status bar parts: spacer, Ln/Col, line count, line ending, encoding.
+const STATUS_PARTS: usize = 5;
+/// Widths (96-DPI pixels) of the fixed parts, right to left after the spacer.
+const STATUS_WIDTHS: [i32; STATUS_PARTS - 1] = [150, 140, 120, 80];
 
 struct App {
     main: Cell<HWND>,
@@ -32,6 +36,9 @@ struct App {
     find_dlg: Cell<HWND>,
     find_msg: Cell<u32>,
     find: Cell<*mut FINDREPLACEW>,
+    status: Cell<HWND>,
+    /// Last text per status part, to skip redundant SB_SETTEXT (avoids flicker).
+    status_parts: RefCell<[String; STATUS_PARTS]>,
 }
 
 thread_local! {
@@ -44,6 +51,8 @@ thread_local! {
         find_dlg: Cell::new(null_mut()),
         find_msg: Cell::new(0),
         find: Cell::new(null_mut()),
+        status: Cell::new(null_mut()),
+        status_parts: RefCell::new([const { String::new() }; STATUS_PARTS]),
     } };
 }
 
@@ -108,6 +117,100 @@ unsafe fn update_title() {
 unsafe fn set_doc(doc: Document) {
     app(|a| *a.doc.borrow_mut() = doc);
     update_title();
+    update_status();
+}
+
+/// 12345678 -> "12,345,678".
+fn group(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+unsafe fn update_status() {
+    let (status, edit) = app(|a| (a.status.get(), a.edit.get()));
+    if !status_shown(status) {
+        return;
+    }
+    let parts = textview::peek(edit, |ed| {
+        let (line, col) = ed.caret_line_col();
+        let lines = ed.buffer().line_count();
+        [
+            String::new(),
+            format!("Ln {}, Col {}", group(line), group(col)),
+            format!(
+                "{} {}",
+                group(lines),
+                if lines == 1 { "line" } else { "lines" }
+            ),
+            if ed.eol() == "\r\n" {
+                "Windows (CRLF)"
+            } else {
+                "Unix (LF)"
+            }
+            .to_owned(),
+            "UTF-8".to_owned(),
+        ]
+    });
+    app(|a| {
+        let mut last = a.status_parts.borrow_mut();
+        for (i, text) in parts.into_iter().enumerate() {
+            if last[i] != text {
+                let w = wide(&text);
+                SendMessageW(status, SB_SETTEXTW, i, w.as_ptr() as LPARAM);
+                last[i] = text;
+            }
+        }
+    });
+}
+
+/// The status bar's own visibility (not its parent's, which is hidden during startup).
+unsafe fn status_shown(status: HWND) -> bool {
+    !status.is_null() && GetWindowLongW(status, GWL_STYLE) as u32 & WS_VISIBLE != 0
+}
+
+/// Sizes the status bar (if shown) and gives the text view the rest.
+unsafe fn layout_children(hwnd: HWND) {
+    let (edit, status) = app(|a| (a.edit.get(), a.status.get()));
+    let mut rc: RECT = zeroed();
+    GetClientRect(hwnd, &mut rc);
+    let mut bottom = rc.bottom;
+    if status_shown(status) {
+        SendMessageW(status, WM_SIZE, 0, 0);
+        let mut sr: RECT = zeroed();
+        GetWindowRect(status, &mut sr);
+        bottom -= sr.bottom - sr.top;
+        let dpi = GetDpiForWindow(hwnd) as i32;
+        let mut edges = [0i32; STATUS_PARTS];
+        let mut right = rc.right;
+        edges[STATUS_PARTS - 1] = -1;
+        for i in (1..STATUS_PARTS - 1).rev() {
+            right -= STATUS_WIDTHS[i] * dpi / 96;
+            edges[i] = right;
+        }
+        edges[0] = right - STATUS_WIDTHS[0] * dpi / 96;
+        SendMessageW(status, SB_SETPARTS, STATUS_PARTS, edges.as_ptr() as LPARAM);
+    }
+    MoveWindow(edit, 0, 0, rc.right, bottom.max(0), 1);
+}
+
+unsafe fn toggle_status_bar() {
+    let (main, status) = app(|a| (a.main.get(), a.status.get()));
+    let show = !status_shown(status);
+    ShowWindow(status, if show { SW_SHOW } else { SW_HIDE });
+    let check = if show { MF_CHECKED } else { MF_UNCHECKED };
+    CheckMenuItem(GetMenu(main), ID_STATUS_BAR as u32, MF_BYCOMMAND | check);
+    layout_children(main);
+    if show {
+        app(|a| *a.status_parts.borrow_mut() = [const { String::new() }; STATUS_PARTS]);
+        update_status();
+    }
 }
 
 unsafe fn error_box(msg: &str) {
@@ -306,10 +409,15 @@ unsafe fn build_menu() -> HMENU {
     let format = CreatePopupMenu();
     item(format, ID_WRAP, w!("&Word Wrap"));
 
+    let view = CreatePopupMenu();
+    item(view, ID_STATUS_BAR, w!("&Status Bar"));
+    CheckMenuItem(view, ID_STATUS_BAR as u32, MF_BYCOMMAND | MF_CHECKED);
+
     let bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, file as usize, w!("&File"));
     AppendMenuW(bar, MF_POPUP, edit as usize, w!("&Edit"));
     AppendMenuW(bar, MF_POPUP, format as usize, w!("F&ormat"));
+    AppendMenuW(bar, MF_POPUP, view as usize, w!("&View"));
     bar
 }
 
@@ -319,6 +427,9 @@ unsafe fn on_command(id: u16, code: u16) {
         IDC_EDIT => {
             if code == EN_CHANGE as u16 && app(|a| a.doc.borrow_mut().mark_dirty()) {
                 update_title();
+            }
+            if code == EN_CHANGE as u16 || code == VN_CARET {
+                update_status();
             }
         }
         ID_NEW => {
@@ -359,6 +470,7 @@ unsafe fn on_command(id: u16, code: u16) {
         ID_FIND => show_find(),
         ID_FIND_NEXT => find_next(),
         ID_WRAP => toggle_wrap(),
+        ID_STATUS_BAR => toggle_status_bar(),
         _ => {}
     }
 }
@@ -391,19 +503,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.font.set(make_font(GetDpiForWindow(hwnd)));
             });
             let edit = create_edit(hwnd);
-            app(|a| a.edit.set(edit));
+            let status = CreateWindowExW(
+                0,
+                STATUSCLASSNAMEW,
+                null(),
+                WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
+                0,
+                0,
+                0,
+                0,
+                hwnd,
+                IDC_STATUS as usize as HMENU,
+                GetModuleHandleW(null()),
+                null(),
+            );
+            app(|a| {
+                a.edit.set(edit);
+                a.status.set(status);
+            });
+            layout_children(hwnd);
+            update_status();
             0
         }
         WM_SIZE => {
-            let edit = app(|a| a.edit.get());
-            MoveWindow(
-                edit,
-                0,
-                0,
-                loword(lp as usize) as i32,
-                hiword(lp as usize) as i32,
-                1,
-            );
+            layout_children(hwnd);
             0
         }
         WM_SETFOCUS => {
