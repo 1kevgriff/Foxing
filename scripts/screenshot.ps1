@@ -15,9 +15,9 @@ public static class Snap {
 '@
 [Snap]::SetProcessDPIAware() | Out-Null
 
-$sample = Join-Path ([IO.Path]::GetTempPath()) 'notes.txt'
+$sample = Join-Path ([IO.Path]::GetTempPath()) 'todo.txt'
 @'
-Foxing — plain-text notes
+Foxing — plain text
 
 Groceries
   - coffee beans

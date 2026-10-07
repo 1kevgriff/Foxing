@@ -19,7 +19,7 @@
       <!-- Per-user components need an HKCU key path (ICE38). -->
       <RegistryValue Root="HKCU" Key="Software\Foxing" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
       <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Foxing"
-                Description="Plain-text notes" Target="[#FoxingExe]" WorkingDirectory="INSTALLFOLDER" />
+                Description="Plain-text editor" Target="[#FoxingExe]" WorkingDirectory="INSTALLFOLDER" />
       <!-- "Open with" for .txt; does not take over the default handler. -->
       <RegistryValue Root="HKCU" Key="Software\Classes\Applications\foxing.exe\shell\open\command"
                      Type="string" Value="&quot;[#FoxingExe]&quot; &quot;%1&quot;" />

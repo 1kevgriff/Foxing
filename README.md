@@ -1,8 +1,8 @@
 # Foxing
 
-A tiny plain-text editor for Windows, written in Rust. Just notes.
+A tiny plain-text editor for Windows, written in Rust. Just text files.
 
-![Foxing editing a short list of notes](docs/screenshot.png)
+![Foxing editing a short text file](docs/screenshot.png)
 
 Foxing is the brown spotting that shows up on old paper. This is the
 paper.
@@ -23,7 +23,7 @@ paper.
 - Undo (`Ctrl+Z`) and redo (`Ctrl+Y`)
 - Find (`Ctrl+F`) and Find Next (`F3`)
 - Word wrap (Format menu)
-- Open from the command line (`foxing notes.txt`) or by dragging a file
+- Open from the command line (`foxing todo.txt`) or by dragging a file
   onto the window
 - Unsaved-changes prompt on close
 
