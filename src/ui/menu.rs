@@ -133,6 +133,9 @@ pub struct MenuBar {
     underline: bool,
     /// Title under the mouse while not in menu mode.
     hover: Option<usize>,
+    /// Last mouse position seen. Windows synthesizes moves without motion (e.g. when
+    /// a drop-down appears under a still cursor); those mustn't steal the keyboard's item.
+    last_mouse: Option<(i32, i32)>,
 }
 
 impl MenuBar {
@@ -413,6 +416,9 @@ impl MenuBar {
     }
 
     pub fn mouse_move(&mut self, bounds: Rect, m: &dyn Measure, x: i32, y: i32) -> MenuMsg {
+        if self.last_mouse.replace((x, y)) == Some((x, y)) {
+            return MenuMsg::Nothing;
+        }
         let title = self.title_at(bounds, m, x, y);
         if !self.active {
             return if std::mem::replace(&mut self.hover, title) != title {
@@ -694,6 +700,18 @@ mod tests {
         b.mouse_move(bounds(), &M, x, y);
         assert_eq!(b.mouse_up(bounds(), &M, x, y), MenuMsg::Command(20));
         assert!(!b.is_active());
+    }
+
+    #[test]
+    fn still_mouse_keeps_keyboard_item() {
+        let mut b = bar();
+        b.mouse_move(bounds(), &M, 700, 300);
+        b.toggle_keyboard();
+        b.key(MenuKey::Down);
+        b.key(MenuKey::Down);
+        // A synthesized move at the same point (drop-down appeared under the cursor).
+        assert_eq!(b.mouse_move(bounds(), &M, 700, 300), MenuMsg::Nothing);
+        assert_eq!(b.key(MenuKey::Enter), MenuMsg::Command(2));
     }
 
     #[test]
