@@ -3,6 +3,7 @@
 //! Components lay themselves out and emit a [`DrawList`]; each platform renders the list
 //! and supplies text measurement through [`Measure`]. Nothing here touches an OS API.
 
+pub mod scroll;
 pub mod status;
 
 /// 0xRRGGBB.
@@ -31,6 +32,10 @@ impl Rect {
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
+
+    pub fn intersects(&self, o: &Rect) -> bool {
+        self.x < o.right() && o.x < self.right() && self.y < o.bottom() && o.y < self.bottom()
     }
 
     /// Shrinks by `d` on every side.
@@ -198,6 +203,8 @@ mod tests {
         assert!(r.contains(10, 20) && !r.contains(40, 20));
         assert_eq!(r.inset(5), Rect::new(15, 25, 20, 30));
         assert_eq!(r.inset(50).w, 0);
+        assert!(r.intersects(&Rect::new(39, 59, 5, 5)));
+        assert!(!r.intersects(&Rect::new(40, 20, 5, 5)));
     }
 
     #[test]

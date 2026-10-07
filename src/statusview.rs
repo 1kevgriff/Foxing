@@ -1,7 +1,7 @@
 //! Win32 host for [`StatusBar`] ("FoxingStatus"). `WM_GETTEXT` returns the parts joined
 //! by tabs, for automation and tests.
 
-use crate::gdi::{self, Gdi};
+use crate::gdi::{self, BackBuffer, Gdi};
 use foxing::ui::status::StatusBar;
 use foxing::ui::{DrawList, Rect, Theme};
 use std::cell::RefCell;
@@ -21,6 +21,7 @@ struct State {
     gdi: Gdi,
     font: HFONT,
     theme: Theme,
+    back: BackBuffer,
 }
 
 impl Drop for State {
@@ -122,6 +123,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 gdi: g,
                 font,
                 theme: Theme::LIGHT,
+                back: BackBuffer::new(),
             }));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(s) as isize);
             DefWindowProcW(hwnd, msg, wp, lp)
@@ -139,12 +141,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             let Some(s) = state(hwnd) else {
                 return DefWindowProcW(hwnd, msg, wp, lp);
             };
-            let s = s.borrow();
-            gdi::paint_buffered(hwnd, |dc, w, h| {
+            let mut s = s.borrow_mut();
+            let State {
+                bar,
+                gdi: g,
+                theme,
+                back,
+                ..
+            } = &mut *s;
+            back.paint(hwnd, |dc, w, h, _| {
                 let mut dl = DrawList::default();
-                s.bar
-                    .paint(Rect::new(0, 0, w, h), &s.theme, &s.gdi, &mut dl);
-                gdi::render(dc, &dl, &s.gdi);
+                bar.paint(Rect::new(0, 0, w, h), theme, g, &mut dl);
+                gdi::render(dc, &dl, g);
             });
             0
         }

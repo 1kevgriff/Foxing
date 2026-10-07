@@ -61,7 +61,12 @@ pub struct Row {
     pub line: usize,
     /// Byte range of the row's text (excludes the line break).
     pub range: Range<usize>,
+    /// This row ends its line and a line break follows `range.end`.
+    pub brk: bool,
 }
+
+/// Inputs that determine the visible rows.
+type RowsKey = (u64, (usize, usize), usize, usize, usize, bool);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Motion {
@@ -115,6 +120,10 @@ pub struct Editor {
     layouts: RefCell<Vec<(usize, Rc<[usize]>)>>,
     /// Bumped on every text change.
     version: u64,
+    /// Line where the last edit started (for partial repaints).
+    last_edit_line: usize,
+    /// Last `visible_rows` result; painting, caret, and scrollbars all ask per keystroke.
+    rows_memo: RefCell<Option<(RowsKey, Rc<[Row]>)>>,
 }
 
 impl Editor {
@@ -135,6 +144,8 @@ impl Editor {
             left: 0,
             layouts: RefCell::new(Vec::new()),
             version: 0,
+            last_edit_line: 0,
+            rows_memo: RefCell::new(None),
         }
     }
 
@@ -287,6 +298,12 @@ impl Editor {
         self.buf.insert(at, inserted);
         self.layouts.borrow_mut().clear();
         self.version += 1;
+        self.last_edit_line = self.buf.line_of(at);
+    }
+
+    /// Line where the most recent edit started.
+    pub fn last_edit_line(&self) -> usize {
+        self.last_edit_line
     }
 
     /// Changes whenever the text changes.
@@ -655,24 +672,60 @@ impl Editor {
         }
     }
 
-    /// Rows currently in the viewport, top to bottom.
-    pub fn visible_rows(&self) -> Vec<Row> {
+    /// Rows currently in the viewport, top to bottom. Walks forward from the top line
+    /// with a newline search, so the cost follows the visible bytes, and is memoized
+    /// until the text or viewport changes.
+    pub fn visible_rows(&self) -> Rc<[Row]> {
+        let key = (
+            self.version,
+            self.top,
+            self.left,
+            self.rows,
+            self.cols,
+            self.wrap,
+        );
+        if let Some((k, rows)) = &*self.rows_memo.borrow() {
+            if *k == key {
+                return rows.clone();
+            }
+        }
         let mut out = Vec::with_capacity(self.rows);
         let (mut line, mut row) = self.top;
-        let lines = self.buf.line_count();
-        while out.len() < self.rows && line < lines {
-            let n = self.rows_of(line).len();
-            while row < n && out.len() < self.rows {
+        let len = self.buf.len();
+        let mut start = self.buf.line_start(line);
+        while out.len() < self.rows {
+            let nl = self.buf.find_byte(start, b'\n');
+            let end = match nl {
+                Some(n) if n > start && self.buf.byte_at(n - 1) == b'\r' => n - 1,
+                Some(n) => n,
+                None => len,
+            };
+            let starts = if self.wrap {
+                self.rows_of(line)
+            } else {
+                Rc::from([start])
+            };
+            while row < starts.len() && out.len() < self.rows {
+                let last = row + 1 == starts.len();
                 out.push(Row {
                     line,
-                    range: self.row_range(line, row),
+                    range: starts[row]..starts.get(row + 1).copied().unwrap_or(end),
+                    brk: last && nl.is_some(),
                 });
                 row += 1;
             }
-            line += 1;
-            row = 0;
+            match nl {
+                Some(n) => {
+                    start = n + 1;
+                    line += 1;
+                    row = 0;
+                }
+                None => break,
+            }
         }
-        out
+        let rows: Rc<[Row]> = out.into();
+        *self.rows_memo.borrow_mut() = Some((key, rows.clone()));
+        rows
     }
 
     /// Glyphs of `row` within the visible columns.
