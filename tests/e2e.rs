@@ -20,6 +20,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const EXE: &str = env!("CARGO_BIN_EXE_foxing");
 const EDT1: i32 = 0x480; // Find dialog's text box
+const MB_GETCHECK: u32 = WM_APP + 1;
+const MB_GETOPEN: u32 = WM_APP + 2;
+const MB_ISACTIVE: u32 = WM_APP + 3;
+const VK_MENU: usize = 0x12;
+const VK_RIGHT: usize = 0x27;
+const VK_DOWN: usize = 0x28;
+const VK_RETURN: usize = 0x0D;
+const VK_ESCAPE: usize = 0x1B;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -176,6 +184,27 @@ impl App {
             .to_owned()
     }
 
+    fn menubar(&self) -> HWND {
+        unsafe { GetDlgItem(self.hwnd, IDC_MENUBAR as i32) }
+    }
+
+    fn menu_checked(&self, id: u16) -> bool {
+        unsafe { SendMessageW(self.menubar(), MB_GETCHECK, id as WPARAM, 0) != 0 }
+    }
+
+    fn menu_open(&self) -> isize {
+        unsafe { SendMessageW(self.menubar(), MB_GETOPEN, 0, 0) }
+    }
+
+    fn menu_active(&self) -> bool {
+        unsafe { SendMessageW(self.menubar(), MB_ISACTIVE, 0, 0) != 0 }
+    }
+
+    /// Posts keyboard input through Foxing's message loop, as typing would.
+    fn post(&self, msg: u32, wp: usize, lp: isize) {
+        unsafe { PostMessageW(self.edit(), msg, wp, lp) };
+    }
+
     fn alive(&mut self) -> bool {
         self.child.try_wait().unwrap().is_none()
     }
@@ -252,6 +281,7 @@ fn typing_undo_and_lf_preserved_on_save() {
     let f = tmp("lf.txt");
     std::fs::write(&f, "one\ntwo\n").unwrap();
     let app = App::launch(Some(&f));
+    app.set_sel(0, 0);
     for c in "hi".chars() {
         unsafe { SendMessageW(app.edit(), WM_CHAR, c as WPARAM, 0) };
     }
@@ -271,6 +301,8 @@ fn crlf_file_keeps_crlf() {
     let f = tmp("crlf.txt");
     std::fs::write(&f, "a\r\nb").unwrap();
     let app = App::launch(Some(&f));
+    // Pin the caret: a stray real click on the new window must not move it.
+    app.set_sel(0, 0);
     unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) };
     app.cmd(ID_SAVE);
     assert_eq!(std::fs::read(&f).unwrap(), b"\r\na\r\nb");
@@ -302,13 +334,12 @@ fn status_bar_shows_position_lines_and_eol() {
 #[test]
 fn status_bar_toggle() {
     let app = App::launch(None);
-    let checked =
-        || unsafe { GetMenuState(GetMenu(app.hwnd), ID_STATUS_BAR as u32, MF_BYCOMMAND) } & MF_CHECKED;
+    let checked = || app.menu_checked(ID_STATUS_BAR);
     assert_ne!(unsafe { IsWindowVisible(app.status()) }, 0);
-    assert_ne!(checked(), 0);
+    assert!(checked());
     app.cmd(ID_STATUS_BAR);
     assert_eq!(unsafe { IsWindowVisible(app.status()) }, 0);
-    assert_eq!(checked(), 0);
+    assert!(!checked());
     app.cmd(ID_STATUS_BAR);
     assert_ne!(unsafe { IsWindowVisible(app.status()) }, 0);
     assert_eq!(app.status_text(1), "Ln 1, Col 1");
@@ -373,22 +404,69 @@ fn custom_scrollbar_pages_drags_and_wheels() {
 }
 
 #[test]
+fn menu_alt_tap_and_arrows_run_a_command() {
+    let app = App::launch(None);
+    assert!(!app.menu_active());
+    // Alt down + up: menu mode, nothing open.
+    app.post(WM_SYSKEYDOWN, VK_MENU, 0x2000_0001);
+    app.post(WM_SYSKEYUP, VK_MENU, 0xC000_0001u32 as isize);
+    wait_for(2000, || app.menu_active().then_some(())).expect("menu mode");
+    assert_eq!(app.menu_open(), -1);
+    // Right, Right: Format. Down opens it on Word Wrap. Enter runs it.
+    app.post(WM_KEYDOWN, VK_RIGHT, 0);
+    app.post(WM_KEYDOWN, VK_RIGHT, 0);
+    app.post(WM_KEYDOWN, VK_DOWN, 0);
+    wait_for(2000, || (app.menu_open() == 2).then_some(())).expect("Format open");
+    app.post(WM_KEYDOWN, VK_RETURN, 0);
+    wait_for(2000, || app.menu_checked(ID_WRAP).then_some(())).expect("Word Wrap on");
+    assert!(!app.menu_active());
+}
+
+#[test]
+fn menu_mnemonics_and_escape() {
+    let app = App::launch(None);
+    // Alt+V opens View; S runs Status Bar (hides it).
+    app.post(WM_SYSCHAR, 'v' as usize, 0x2000_0001);
+    wait_for(2000, || (app.menu_open() == 3).then_some(())).expect("View open");
+    app.post(WM_CHAR, 's' as usize, 0);
+    wait_for(2000, || (!app.menu_checked(ID_STATUS_BAR)).then_some(())).expect("status toggled");
+    assert_eq!(unsafe { IsWindowVisible(app.status()) }, 0);
+    // Alt+F then Esc twice leaves menu mode without running anything.
+    app.post(WM_SYSCHAR, 'f' as usize, 0x2000_0001);
+    wait_for(2000, || (app.menu_open() == 0).then_some(())).expect("File open");
+    app.post(WM_KEYDOWN, VK_ESCAPE, 0);
+    app.post(WM_KEYDOWN, VK_ESCAPE, 0);
+    wait_for(2000, || (!app.menu_active()).then_some(())).expect("menu closed");
+    assert_eq!(app.title(), "Untitled - Foxing");
+}
+
+#[test]
+fn menu_mouse_click_opens_and_closes() {
+    let app = App::launch(None);
+    click(app.menubar(), 8, 8);
+    assert_eq!(app.menu_open(), 0, "File open");
+    // Clicking the open title again closes it.
+    click(app.menubar(), 8, 8);
+    assert_eq!(app.menu_open(), -1);
+    assert!(!app.menu_active());
+}
+
+#[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);
     app.type_text("some text that is here");
     app.set_sel(5, 9);
-    let checked =
-        || unsafe { GetMenuState(GetMenu(app.hwnd), ID_WRAP as u32, MF_BYCOMMAND) } & MF_CHECKED;
-    assert_eq!(checked(), 0);
+    let checked = || app.menu_checked(ID_WRAP);
+    assert!(!checked());
 
     app.cmd(ID_WRAP);
     assert_eq!(app.text(), "some text that is here");
     assert_eq!(app.sel(), (5, 9));
     assert_eq!(app.title(), "*Untitled - Foxing");
-    assert_ne!(checked(), 0);
+    assert!(checked());
 
     app.cmd(ID_WRAP);
-    assert_eq!(checked(), 0);
+    assert!(!checked());
     assert_eq!(app.sel(), (5, 9));
 }
 

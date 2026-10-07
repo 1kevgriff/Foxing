@@ -107,6 +107,18 @@ pub unsafe fn render(hdc: HDC, dl: &DrawList, g: &Gdi) {
                 };
                 fill(hdc, &rc, *color);
             }
+            Cmd::Polyline {
+                points,
+                color,
+                width,
+            } => {
+                let pen = CreatePen(PS_SOLID, *width, colorref(*color));
+                let old = SelectObject(hdc, pen as HGDIOBJ);
+                let pts: Vec<POINT> = points.iter().map(|&(x, y)| POINT { x, y }).collect();
+                Polyline(hdc, pts.as_ptr(), pts.len() as i32);
+                SelectObject(hdc, old);
+                DeleteObject(pen as HGDIOBJ);
+            }
             Cmd::Text {
                 x,
                 y,
