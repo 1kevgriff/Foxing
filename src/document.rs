@@ -1,16 +1,16 @@
 //! The open document: file path, unsaved-changes state, load and save.
-//! Text crossing this API uses `\n` line endings; shells convert at their boundary.
+//! Contents live in a [`Buffer`]; bytes round-trip unchanged, line endings included.
 
-use crate::text;
-use std::io;
+use crate::buffer::Buffer;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub const APP_NAME: &str = "Foxing";
 
 #[cfg(windows)]
-const NATIVE_EOL: &str = "\r\n";
+pub const NATIVE_EOL: &str = "\r\n";
 #[cfg(not(windows))]
-const NATIVE_EOL: &str = "\n";
+pub const NATIVE_EOL: &str = "\n";
 
 #[derive(Debug, Default)]
 pub struct Document {
@@ -28,10 +28,10 @@ impl Document {
     }
 
     /// Opens `path`. A missing file yields an empty document created on first save.
-    pub fn open(path: PathBuf) -> io::Result<(Document, String)> {
-        let body = match std::fs::read(&path) {
-            Ok(bytes) => text::to_lf(&text::decode(&bytes)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+    pub fn open(path: PathBuf) -> io::Result<(Document, Buffer)> {
+        let body = match Buffer::open(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Buffer::new(),
             Err(e) => return Err(e),
         };
         let doc = Document {
@@ -41,9 +41,23 @@ impl Document {
         Ok((doc, body))
     }
 
-    /// Writes `body` as UTF-8 with native line endings, then adopts `path`.
-    pub fn save_as(&mut self, path: PathBuf, body: &str) -> io::Result<()> {
-        std::fs::write(&path, text::with_eol(body, NATIVE_EOL))?;
+    /// Writes `body` as UTF-8 to a temp file beside `path`, then renames it over `path`,
+    /// so a failed save never leaves a truncated file. Then adopts `path`.
+    pub fn save_as(&mut self, path: PathBuf, body: &Buffer) -> io::Result<()> {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let tmp = path.with_file_name(format!(".{}.foxing-tmp", name.unwrap_or_default()));
+        let write = || -> io::Result<()> {
+            let mut w = io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&tmp)?);
+            body.write_to(&mut w)?;
+            w.flush()?;
+            w.get_ref().sync_all()?;
+            drop(w);
+            std::fs::rename(&tmp, &path)
+        };
+        if let Err(e) = write() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
         self.path = Some(path);
         self.dirty = false;
         Ok(())
@@ -103,11 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn open_normalizes_to_lf() {
+    fn open_keeps_bytes() {
         let p = tmp("open.txt");
         std::fs::write(&p, "a\r\nb\rc\n").unwrap();
         let (d, body) = Document::open(p).unwrap();
-        assert_eq!(body, "a\nb\nc\n");
+        assert_eq!(body.slice(0..body.len()), "a\r\nb\rc\n");
         assert_eq!(d.title(), "open.txt - Foxing");
     }
 
@@ -116,18 +130,20 @@ mod tests {
         let p = tmp("missing.txt");
         let _ = std::fs::remove_file(&p);
         let (d, body) = Document::open(p.clone()).unwrap();
-        assert_eq!(body, "");
+        assert!(body.is_empty());
         assert_eq!(d.path(), Some(p.as_path()));
     }
 
     #[test]
-    fn save_writes_native_eol_and_cleans() {
+    fn save_writes_bytes_and_cleans() {
         let p = tmp("save.txt");
+        std::fs::write(&p, "old contents").unwrap();
         let mut d = Document::new();
         d.mark_dirty();
-        d.save_as(p.clone(), "x\ny ✓").unwrap();
-        let expected = format!("x{NATIVE_EOL}y ✓");
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), expected);
+        d.save_as(p.clone(), &Buffer::from_text("x\r\ny ✓"))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "x\r\ny ✓");
+        assert!(!p.with_file_name(".save.txt.foxing-tmp").exists());
         assert!(!d.is_dirty());
         assert_eq!(d.name(), "save.txt");
     }

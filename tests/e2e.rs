@@ -180,7 +180,8 @@ fn open_cli_arg() {
     let f = tmp("cli.txt");
     std::fs::write(&f, "hello\nworld ✓").unwrap();
     let app = App::launch(Some(&f));
-    assert_eq!(app.text(), "hello\r\nworld ✓");
+    // Line endings are preserved as stored.
+    assert_eq!(app.text(), "hello\nworld ✓");
     assert_eq!(app.title(), "cli.txt - Foxing");
 }
 
@@ -234,17 +235,44 @@ fn save_existing() {
 }
 
 #[test]
+fn typing_undo_and_lf_preserved_on_save() {
+    let f = tmp("lf.txt");
+    std::fs::write(&f, "one\ntwo\n").unwrap();
+    let app = App::launch(Some(&f));
+    for c in "hi".chars() {
+        unsafe { SendMessageW(app.edit(), WM_CHAR, c as WPARAM, 0) };
+    }
+    unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) }; // Enter
+    assert_eq!(app.text(), "hi\none\ntwo\n");
+    assert_eq!(app.title(), "*lf.txt - Foxing");
+    unsafe { SendMessageW(app.edit(), WM_UNDO, 0, 0) };
+    assert_eq!(app.text(), "hione\ntwo\n");
+    unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) };
+    app.cmd(ID_SAVE);
+    // The file's LF endings survive; nothing is converted to CRLF.
+    assert_eq!(std::fs::read(&f).unwrap(), b"hi\none\ntwo\n");
+}
+
+#[test]
+fn crlf_file_keeps_crlf() {
+    let f = tmp("crlf.txt");
+    std::fs::write(&f, "a\r\nb").unwrap();
+    let app = App::launch(Some(&f));
+    unsafe { SendMessageW(app.edit(), WM_CHAR, 0x0D, 0) };
+    app.cmd(ID_SAVE);
+    assert_eq!(std::fs::read(&f).unwrap(), b"\r\na\r\nb");
+}
+
+#[test]
 fn word_wrap_toggle() {
     let app = App::launch(None);
     app.type_text("some text that is here");
     app.set_sel(5, 9);
-    let old = app.edit();
     let checked =
         || unsafe { GetMenuState(GetMenu(app.hwnd), ID_WRAP as u32, MF_BYCOMMAND) } & MF_CHECKED;
     assert_eq!(checked(), 0);
 
     app.cmd(ID_WRAP);
-    assert_ne!(app.edit(), old, "edit control should be recreated");
     assert_eq!(app.text(), "some text that is here");
     assert_eq!(app.sel(), (5, 9));
     assert_eq!(app.title(), "*Untitled - Foxing");

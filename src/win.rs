@@ -1,8 +1,8 @@
 //! Win32 shell: windows, menus, dialogs. Document and text logic live in the library.
 
 use crate::ids::*;
+use crate::textview;
 use foxing::document::Document;
-use foxing::text;
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::mem::{size_of, zeroed};
@@ -22,8 +22,6 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const FIND_BUF_LEN: usize = 256;
-/// EM_SETLIMITTEXT(0) maximum for a multiline EDIT control.
-const EDIT_MAX_CHARS: usize = 0x7FFF_FFFE;
 
 struct App {
     main: Cell<HWND>,
@@ -65,25 +63,6 @@ fn hiword(v: usize) -> u16 {
     (v >> 16) as u16
 }
 
-unsafe fn get_text(h: HWND) -> Vec<u16> {
-    let len = GetWindowTextLengthW(h);
-    let mut buf = vec![0u16; len as usize + 1];
-    let got = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
-    buf.truncate(got as usize);
-    buf
-}
-
-unsafe fn get_sel(edit: HWND) -> (usize, usize) {
-    let (mut s, mut e) = (0u32, 0u32);
-    SendMessageW(
-        edit,
-        EM_GETSEL,
-        &mut s as *mut u32 as WPARAM,
-        &mut e as *mut u32 as LPARAM,
-    );
-    (s as usize, e as usize)
-}
-
 unsafe fn set_sel(edit: HWND, s: usize, e: usize) {
     SendMessageW(edit, EM_SETSEL, s, e as LPARAM);
     SendMessageW(edit, EM_SCROLLCARET, 0, 0);
@@ -108,27 +87,8 @@ unsafe fn make_font(dpi: u32) -> HFONT {
     )
 }
 
-unsafe fn create_edit(parent: HWND, wrap: bool) -> HWND {
-    let mut style =
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | (ES_MULTILINE | ES_AUTOVSCROLL | ES_NOHIDESEL) as u32;
-    if !wrap {
-        style |= WS_HSCROLL | ES_AUTOHSCROLL as u32;
-    }
-    let edit = CreateWindowExW(
-        0,
-        w!("EDIT"),
-        null(),
-        style,
-        0,
-        0,
-        0,
-        0,
-        parent,
-        IDC_EDIT as usize as HMENU,
-        GetModuleHandleW(null()),
-        null(),
-    );
-    SendMessageW(edit, EM_SETLIMITTEXT, 0, 0);
+unsafe fn create_edit(parent: HWND) -> HWND {
+    let edit = textview::create(parent, IDC_EDIT);
     SendMessageW(edit, WM_SETFONT, app(|a| a.font.get()) as WPARAM, 1);
     let mut rc: RECT = zeroed();
     GetClientRect(parent, &mut rc);
@@ -161,34 +121,12 @@ unsafe fn error_box(msg: &str) {
 }
 
 unsafe fn load_file(path: PathBuf) {
-    match Document::open(path.clone()) {
+    let wait = SetCursor(LoadCursorW(null_mut(), IDC_WAIT));
+    let opened = Document::open(path.clone());
+    SetCursor(wait);
+    match opened {
         Ok((doc, body)) => {
-            // The EDIT control requires CRLF.
-            let edit = app(|a| a.edit.get());
-            let s = wide(&text::with_eol(&body, "\r\n"));
-            drop(body);
-            let units = s.len() - 1;
-            if units > EDIT_MAX_CHARS {
-                error_box(&format!(
-                    "{} is too large to open ({units} characters; the limit is {EDIT_MAX_CHARS}).",
-                    path.display()
-                ));
-                return;
-            }
-            SetWindowTextW(edit, s.as_ptr());
-            // The control can fail silently (out of memory); never adopt a path whose
-            // contents didn't load, or Save would overwrite the file with partial text.
-            if GetWindowTextLengthW(edit) as usize != units {
-                SetWindowTextW(edit, w!(""));
-                set_doc(Document::new());
-                error_box(&format!(
-                    "{} could not be loaded completely.",
-                    path.display()
-                ));
-                return;
-            }
-            SendMessageW(edit, EM_EMPTYUNDOBUFFER, 0, 0);
-            set_sel(edit, 0, 0);
+            textview::set_buffer(app(|a| a.edit.get()), body);
             set_doc(doc);
         }
         Err(e) => error_box(&format!("Cannot open {}:\n{e}", path.display())),
@@ -196,9 +134,13 @@ unsafe fn load_file(path: PathBuf) {
 }
 
 unsafe fn save_to(path: PathBuf) -> bool {
-    let units = get_text(app(|a| a.edit.get()));
-    let body = text::to_lf(&String::from_utf16_lossy(&units));
-    match app(|a| a.doc.borrow_mut().save_as(path.clone(), &body)) {
+    let edit = app(|a| a.edit.get());
+    let wait = SetCursor(LoadCursorW(null_mut(), IDC_WAIT));
+    let saved = textview::with(edit, |ed| {
+        app(|a| a.doc.borrow_mut().save_as(path.clone(), ed.buffer()))
+    });
+    SetCursor(wait);
+    match saved {
         Ok(()) => {
             update_title();
             true
@@ -274,19 +216,10 @@ unsafe fn confirm_discard() -> bool {
 }
 
 unsafe fn toggle_wrap() {
-    let (main, old) = app(|a| (a.main.get(), a.edit.get()));
-    let mut text = get_text(old);
-    text.push(0);
-    let (s, e) = get_sel(old);
+    let (main, edit) = app(|a| (a.main.get(), a.edit.get()));
     let wrap = !app(|a| a.wrap.get());
-    DestroyWindow(old);
-    let edit = create_edit(main, wrap);
-    SetWindowTextW(edit, text.as_ptr());
-    set_sel(edit, s, e);
-    app(|a| {
-        a.wrap.set(wrap);
-        a.edit.set(edit);
-    });
+    app(|a| a.wrap.set(wrap));
+    textview::set_wrap(edit, wrap);
     let check = if wrap { MF_CHECKED } else { MF_UNCHECKED };
     CheckMenuItem(GetMenu(main), ID_WRAP as u32, MF_BYCOMMAND | check);
     SetFocus(edit);
@@ -331,17 +264,14 @@ unsafe fn find_next() {
         show_find();
         return;
     }
-    let needle = needle(fr);
-    let edit = app(|a| a.edit.get());
-    let hay = get_text(edit);
-    let (s, e) = get_sel(edit);
+    let needle = String::from_utf16_lossy(&needle(fr));
     let down = (*fr).Flags & FR_DOWN != 0;
     let case = (*fr).Flags & FR_MATCHCASE != 0;
-    match text::find(&hay, &needle, if down { e } else { s }, case, down) {
-        Some(i) => set_sel(edit, i, i + needle.len()),
-        None => {
-            MessageBeep(MB_OK);
-        }
+    let wait = SetCursor(LoadCursorW(null_mut(), IDC_WAIT));
+    let found = textview::with(app(|a| a.edit.get()), |ed| ed.find(&needle, down, case));
+    SetCursor(wait);
+    if !found {
+        MessageBeep(MB_OK);
     }
 }
 
@@ -460,7 +390,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.main.set(hwnd);
                 a.font.set(make_font(GetDpiForWindow(hwnd)));
             });
-            let edit = create_edit(hwnd, false);
+            let edit = create_edit(hwnd);
             app(|a| a.edit.set(edit));
             0
         }
@@ -521,6 +451,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
 pub fn run() {
     unsafe {
+        textview::register();
         let hinst = GetModuleHandleW(null());
         let class = w!("foxing");
         let wc = WNDCLASSW {

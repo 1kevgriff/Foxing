@@ -1,4 +1,4 @@
-//! Pure text handling: decoding, line endings, search. No Win32.
+//! Pure text handling: decoding and line endings. No Win32.
 
 /// Windows-1252 code points for bytes 0x80..=0x9F (undefined slots map to themselves).
 const CP1252_HIGH: [u16; 32] = [
@@ -60,47 +60,6 @@ pub fn with_eol(s: &str, eol: &str) -> String {
         s.to_owned()
     } else {
         s.replace('\n', eol)
-    }
-}
-
-fn fold(c: u16) -> u16 {
-    let Some(ch) = char::from_u32(c as u32) else {
-        return c;
-    };
-    let mut lower = ch.to_lowercase();
-    match (lower.next(), lower.next()) {
-        (Some(l), None) if (l as u32) < 0x10000 => l as u32 as u16,
-        _ => c,
-    }
-}
-
-/// Finds `needle` in UTF-16 `hay`. Down: first match starting at or after `from`.
-/// Up: last match ending at or before `from`.
-pub fn find(
-    hay: &[u16],
-    needle: &[u16],
-    from: usize,
-    match_case: bool,
-    down: bool,
-) -> Option<usize> {
-    let n = needle.len();
-    if n == 0 || n > hay.len() {
-        return None;
-    }
-    let f = |c: u16| if match_case { c } else { fold(c) };
-    let is_match = |i: usize| {
-        hay[i..i + n]
-            .iter()
-            .zip(needle)
-            .all(|(&a, &b)| f(a) == f(b))
-    };
-    let last = hay.len() - n;
-    if down {
-        (from..=last).find(|&i| is_match(i))
-    } else if from < n {
-        None
-    } else {
-        (0..=(from - n).min(last)).rev().find(|&i| is_match(i))
     }
 }
 
@@ -173,42 +132,5 @@ mod tests {
         assert_eq!(with_eol("a\nb\n", "\r\n"), "a\r\nb\r\n");
         assert_eq!(with_eol("a\nb", "\n"), "a\nb");
         assert_eq!(to_lf(&with_eol("x\ny", "\r\n")), "x\ny");
-    }
-
-    #[test]
-    fn find_down_and_case() {
-        let h = u("Foo foo FOO");
-        assert_eq!(find(&h, &u("foo"), 0, true, true), Some(4));
-        assert_eq!(find(&h, &u("foo"), 0, false, true), Some(0));
-        assert_eq!(find(&h, &u("foo"), 1, false, true), Some(4));
-        assert_eq!(find(&h, &u("foo"), 5, false, true), Some(8));
-        assert_eq!(find(&h, &u("foo"), 9, false, true), None);
-    }
-
-    #[test]
-    fn find_up() {
-        let h = u("Foo foo FOO");
-        assert_eq!(find(&h, &u("foo"), 11, false, false), Some(8));
-        assert_eq!(find(&h, &u("foo"), 8, false, false), Some(4));
-        assert_eq!(find(&h, &u("foo"), 11, true, false), Some(4));
-        assert_eq!(find(&h, &u("foo"), 2, false, false), None);
-    }
-
-    #[test]
-    fn find_edges_and_misses() {
-        let h = u("abc");
-        assert_eq!(find(&h, &u("abc"), 0, true, true), Some(0));
-        assert_eq!(find(&h, &u("abc"), 3, true, false), Some(0));
-        assert_eq!(find(&h, &u("abcd"), 0, true, true), None);
-        assert_eq!(find(&h, &u(""), 0, true, true), None);
-        assert_eq!(find(&h, &u("z"), 0, true, true), None);
-        assert_eq!(find(&h, &u("c"), 99, true, true), None);
-    }
-
-    #[test]
-    fn find_non_ascii() {
-        let h = u("Ünïcode 🎉 ünïcode");
-        assert_eq!(find(&h, &u("ÜNÏ"), 1, false, true), Some(11));
-        assert_eq!(find(&h, &u("🎉"), 0, true, true), Some(8));
     }
 }
