@@ -527,6 +527,22 @@ impl Editor {
         }
         self.rows = rows.max(1);
         self.cols = cols;
+        self.clamp_top();
+    }
+
+    /// Without wrap, scrolling stops when the last line reaches the bottom (like
+    /// Notepad, and matching the scrollbar's range). Wrapped rows vary per line, so
+    /// wrap mode only keeps the top on a real line.
+    fn clamp_top(&mut self) {
+        let lines = self.buf.line_count();
+        let max = if self.wrap {
+            lines - 1
+        } else {
+            lines.saturating_sub(self.rows)
+        };
+        if self.top.0 > max {
+            self.top = (max, 0);
+        }
     }
 
     /// Row start offsets (absolute) for `line`; one row unless wrapping.
@@ -630,10 +646,12 @@ impl Editor {
 
     pub fn scroll_rows(&mut self, delta: i64) {
         self.top = self.offset_rows(self.top, delta);
+        self.clamp_top();
     }
 
     pub fn scroll_to_line(&mut self, line: usize) {
         self.top = (line.min(self.buf.line_count() - 1), 0);
+        self.clamp_top();
     }
 
     pub fn scroll_cols(&mut self, delta: i64) {
@@ -1062,6 +1080,24 @@ mod tests {
         assert!(e.top_line() > 0 && e.top_line() <= 18);
         e.move_caret(Motion::DocEnd, false);
         assert_eq!(e.top_line(), 100 - 9);
+    }
+
+    #[test]
+    fn scrolling_stops_at_the_last_page() {
+        let s: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut e = ed(&s);
+        e.set_view(10, 40);
+        e.scroll_rows(1000);
+        assert_eq!(e.top_line(), 101 - 10);
+        e.scroll_to_line(usize::MAX);
+        assert_eq!(e.top_line(), 91);
+        // Growing the view pulls the top back so the last page stays full.
+        e.set_view(50, 40);
+        assert_eq!(e.top_line(), 51);
+        // Short documents never scroll.
+        let mut short = ed("a\nb");
+        short.scroll_rows(5);
+        assert_eq!(short.top_line(), 0);
     }
 
     #[test]

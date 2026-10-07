@@ -405,7 +405,7 @@ fn click(h: HWND, x: i32, y: i32) {
 #[test]
 fn custom_scrollbar_pages_drags_and_wheels() {
     let f = tmp("scroll.txt");
-    let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
+    let body: String = (0..5000).map(|i| format!("line {i}\n")).collect();
     std::fs::write(&f, body).unwrap();
     let app = App::launch(Some(&f));
     let edit = app.edit();
@@ -423,11 +423,14 @@ fn custom_scrollbar_pages_drags_and_wheels() {
         // Grab whatever is under the pointer at the top after scrolling back up.
         SendMessageW(edit, WM_VSCROLL, SB_TOP as WPARAM, 0);
         SendMessageW(edit, WM_LBUTTONDOWN, 1, lp_at(5));
-        SendMessageW(edit, WM_MOUSEMOVE, 1, lp_at(h * 10));
-        SendMessageW(edit, WM_LBUTTONUP, 0, lp_at(h * 10));
+        SendMessageW(edit, WM_MOUSEMOVE, 1, lp_at(h + 200));
+        SendMessageW(edit, WM_LBUTTONUP, 0, lp_at(h + 200));
     }
     let bottom = first_visible(&app);
-    assert!(bottom > 400, "dragged to {bottom}");
+    assert!(bottom > 0, "dragged to {bottom}");
+    // At the last page, one more line down doesn't move (holds for any window size).
+    unsafe { SendMessageW(edit, WM_VSCROLL, SB_LINEDOWN as WPARAM, 0) };
+    assert_eq!(first_visible(&app), bottom, "drag reached the end");
 
     // Wheel up three notches scrolls back toward the top.
     unsafe { SendMessageW(edit, WM_MOUSEWHEEL, (120usize * 3) << 16, 0) };
